@@ -55,7 +55,7 @@ def temporalize_mcp_server(
     async def list_tools() -> list[mcp_types.Tool]:
         return await workflow.execute_activity(  # pyright: ignore[reportUnknownVariableType,reportUnknownMemberType]
             activity=list_tools_activity,
-            **settings.execute_activity_kwargs,
+            **settings.execute_activity_options,
         )
 
     async def direct_call_tool(
@@ -66,7 +66,7 @@ def temporalize_mcp_server(
         return await workflow.execute_activity(  # pyright: ignore[reportUnknownMemberType]
             activity=call_tool_activity,
             arg=_CallToolParams(name=name, tool_args=args, metadata=metadata),
-            **settings.for_tool(id, name).execute_activity_kwargs,
+            **settings.for_tool(id, name).execute_activity_options,
         )
 
     server.list_tools = list_tools
@@ -75,47 +75,3 @@ def temporalize_mcp_server(
     activities = [list_tools_activity, call_tool_activity]
     setattr(server, '__temporal_activities', activities)
     return activities
-
-
-# class TemporalMCPServer(WrapperToolset[Any]):
-#     temporal_settings: TemporalSettings
-
-#     @property
-#     def wrapped_server(self) -> MCPServer:
-#         assert isinstance(self.wrapped, MCPServer)
-#         return self.wrapped
-
-#     def __init__(self, wrapped: MCPServer, temporal_settings: TemporalSettings | None = None):
-#         assert isinstance(self.wrapped, MCPServer)
-#         super().__init__(wrapped)
-#         self.temporal_settings = temporal_settings or TemporalSettings()
-
-#         @activity.defn(name='mcp_server_list_tools')
-#         async def list_tools_activity() -> list[mcp_types.Tool]:
-#             return await self.wrapped_server.list_tools()
-
-#         self.list_tools_activity = list_tools_activity
-
-#         @activity.defn(name='mcp_server_call_tool')
-#         async def call_tool_activity(params: MCPCallToolParams) -> ToolResult:
-#             return await self.wrapped_server.direct_call_tool(params.name, params.tool_args, params.metadata)
-
-#         self.call_tool_activity = call_tool_activity
-
-#     async def list_tools(self) -> list[mcp_types.Tool]:
-#         return await workflow.execute_activity(
-#             activity=self.list_tools_activity,
-#             **self.temporal_settings.__dict__,
-#         )
-
-#     async def direct_call_tool(
-#         self,
-#         name: str,
-#         args: dict[str, Any],
-#         metadata: dict[str, Any] | None = None,
-#     ) -> ToolResult:
-#         return await workflow.execute_activity(
-#             activity=self.call_tool_activity,
-#             arg=MCPCallToolParams(name=name, tool_args=args, metadata=metadata),
-#             **self.temporal_settings.__dict__,
-#         )

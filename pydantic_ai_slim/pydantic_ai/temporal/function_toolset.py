@@ -57,7 +57,7 @@ def temporalize_function_toolset(
         return await workflow.execute_activity(  # pyright: ignore[reportUnknownMemberType]
             activity=call_tool_activity,
             arg=_CallToolParams(name=name, tool_args=tool_args, serialized_run_context=serialized_run_context),
-            **tool_settings.execute_activity_kwargs,
+            **tool_settings.execute_activity_options,
         )
 
     toolset.call_tool = call_tool
@@ -65,36 +65,3 @@ def temporalize_function_toolset(
     activities = [call_tool_activity]
     setattr(toolset, '__temporal_activities', activities)
     return activities
-
-
-# class TemporalFunctionToolset(FunctionToolset[AgentDepsT]):
-#     def __init__(
-#         self,
-#         tools: Sequence[Tool[AgentDepsT] | ToolFuncEither[AgentDepsT, ...]] = [],
-#         max_retries: int = 1,
-#         temporal_settings: TemporalSettings | None = None,
-#         serialize_run_context: Callable[[RunContext[AgentDepsT]], Any] | None = None,
-#         deserialize_run_context: Callable[[Any], RunContext[AgentDepsT]] | None = None,
-#     ):
-#         super().__init__(tools, max_retries)
-#         self.temporal_settings = temporal_settings or TemporalSettings()
-#         self.serialize_run_context = serialize_run_context or TemporalRunContext[AgentDepsT].serialize_run_context
-#         self.deserialize_run_context = deserialize_run_context or TemporalRunContext[AgentDepsT].deserialize_run_context
-
-#         @activity.defn(name='function_toolset_call_tool')
-#         async def call_tool_activity(params: FunctionCallToolParams) -> Any:
-#             ctx = self.deserialize_run_context(params.serialized_run_context)
-#             tool = (await self.get_tools(ctx))[params.name]
-#             return await FunctionToolset[AgentDepsT].call_tool(self, params.name, params.tool_args, ctx, tool)
-
-#         self.call_tool_activity = call_tool_activity
-
-#     async def call_tool(
-#         self, name: str, tool_args: dict[str, Any], ctx: RunContext[AgentDepsT], tool: ToolsetTool[AgentDepsT]
-#     ) -> Any:
-#         serialized_run_context = self.serialize_run_context(ctx)
-#         return await workflow.execute_activity(
-#             activity=self.call_tool_activity,
-#             arg=FunctionCallToolParams(name=name, tool_args=tool_args, serialized_run_context=serialized_run_context),
-#             **self.temporal_settings.__dict__,
-#         )

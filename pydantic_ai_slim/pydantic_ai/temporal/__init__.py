@@ -11,10 +11,8 @@ from pydantic_ai._run_context import AgentDepsT, RunContext
 
 
 class _TemporalRunContext(RunContext[AgentDepsT]):
-    _data: dict[str, Any]
-
     def __init__(self, **kwargs: Any):
-        self._data = kwargs
+        self.__dict__ = kwargs
         setattr(
             self,
             '__dataclass_fields__',
@@ -25,10 +23,12 @@ class _TemporalRunContext(RunContext[AgentDepsT]):
         try:
             return super().__getattribute__(name)
         except AttributeError as e:
-            data = super().__getattribute__('_data')
-            if name in data:
-                return data[name]
-            raise e  # TODO: Explain how to make a new run context attribute available
+            if name in RunContext.__dataclass_fields__:
+                raise AttributeError(
+                    f'Temporalized {RunContext.__name__!r} object has no attribute {name!r}. To make the attribute available, pass a `TemporalSettings` object to `temporalize_agent` that has a custom `serialize_run_context` function that returns a dictionary that includes the attribute.'
+                )
+            else:
+                raise e
 
     @classmethod
     def serialize_run_context(cls, ctx: RunContext[AgentDepsT]) -> dict[str, Any]:
@@ -75,7 +75,7 @@ class TemporalSettings:
     deserialize_run_context: Callable[[dict[str, Any]], RunContext] = _TemporalRunContext.deserialize_run_context
 
     @property
-    def execute_activity_kwargs(self) -> dict[str, Any]:
+    def execute_activity_options(self) -> dict[str, Any]:
         return {
             'task_queue': self.task_queue,
             'schedule_to_close_timeout': self.schedule_to_close_timeout,

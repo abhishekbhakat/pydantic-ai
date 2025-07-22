@@ -6,6 +6,7 @@
 # ///
 import asyncio
 import random
+from collections.abc import AsyncIterable
 from datetime import timedelta
 
 from temporalio import workflow
@@ -14,11 +15,13 @@ from temporalio.contrib.opentelemetry import TracingInterceptor
 from temporalio.contrib.pydantic import pydantic_data_converter
 from temporalio.runtime import OpenTelemetryConfig, Runtime, TelemetryConfig
 from temporalio.worker import Worker
+from typing_extensions import TypedDict
 
 with workflow.unsafe.imports_passed_through():
     from pydantic_ai import Agent
+    from pydantic_ai._run_context import RunContext
     from pydantic_ai.mcp import MCPServerStdio
-    from pydantic_ai.models.openai import OpenAIModel
+    from pydantic_ai.messages import AgentStreamEvent, HandleResponseEvent
     from pydantic_ai.temporal import (
         TemporalSettings,
         initialize_temporal,
@@ -28,10 +31,13 @@ with workflow.unsafe.imports_passed_through():
 
     initialize_temporal()
 
-    def get_uv_index(location: str) -> int:
-        return 3
+    class Deps(TypedDict):
+        country: str
 
-    toolset = FunctionToolset(tools=[get_uv_index], id='uv_index')
+    def get_country(ctx: RunContext[Deps]) -> str:
+        return ctx.deps['country']
+
+    toolset = FunctionToolset[Deps](tools=[get_country], id='country')
     mcp_server = MCPServerStdio(
         'python',
         ['-m', 'tests.mcp_server'],
@@ -39,14 +45,26 @@ with workflow.unsafe.imports_passed_through():
         id='test',
     )
 
-    model = OpenAIModel('gpt-4o')
-    my_agent = Agent(model=model, instructions='be helpful', toolsets=[toolset, mcp_server])
+    async def event_stream_handler(
+        ctx: RunContext[Deps],
+        stream: AsyncIterable[AgentStreamEvent | HandleResponseEvent],
+    ):
+        print(f'{ctx.run_step=}')
+        async for event in stream:
+            print(event)
+
+    my_agent = Agent(
+        'openai:gpt-4o',
+        toolsets=[toolset, mcp_server],
+        event_stream_handler=event_stream_handler,
+        deps_type=Deps,
+    )
 
     temporal_settings = TemporalSettings(
         start_to_close_timeout=timedelta(seconds=60),
-        tool_settings={
-            'uv_index': {
-                'get_uv_index': TemporalSettings(start_to_close_timeout=timedelta(seconds=110)),
+        tool_settings={  # TODO: Allow default temporal settings to be set for an entire toolset
+            'country': {
+                'get_country': TemporalSettings(start_to_close_timeout=timedelta(seconds=110)),
             },
         },
     )
@@ -68,8 +86,9 @@ def init_runtime_with_telemetry() -> Runtime:
 @workflow.defn
 class MyAgentWorkflow:
     @workflow.run
-    async def run(self, prompt: str) -> str:
-        return (await my_agent.run(prompt)).output
+    async def run(self, prompt: str, deps: Deps) -> str:
+        result = await my_agent.run(prompt, deps=deps)
+        return result.output
 
 
 async def main():
@@ -88,7 +107,10 @@ async def main():
     ):
         output = await client.execute_workflow(  # pyright: ignore[reportUnknownMemberType]
             MyAgentWorkflow.run,
-            'what is 2 plus the UV Index in Mexico City? and what is the product name?',
+            args=[
+                'what is the capital of the capital of the country? and what is the product name?',
+                Deps(country='Mexico'),
+            ],
             id=f'my-agent-workflow-id-{random.random()}',
             task_queue='my-agent-task-queue',
         )

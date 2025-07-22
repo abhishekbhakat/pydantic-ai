@@ -30,7 +30,7 @@ def temporalize_toolset(toolset: AbstractToolset, settings: TemporalSettings | N
 
 
 def temporalize_agent(
-    agent: Agent,
+    agent: Agent[Any, Any],
     settings: TemporalSettings | None = None,
     temporalize_toolset_func: Callable[
         [AbstractToolset, TemporalSettings | None], list[Callable[..., Any]]
@@ -52,7 +52,7 @@ def temporalize_agent(
 
     activities: list[Callable[..., Any]] = []
     if isinstance(agent.model, Model):
-        activities.extend(temporalize_model(agent.model, settings))
+        activities.extend(temporalize_model(agent.model, settings, agent._event_stream_handler))  # pyright: ignore[reportPrivateUsage]
 
     def temporalize_toolset(toolset: AbstractToolset) -> None:
         activities.extend(temporalize_toolset_func(toolset, settings))
