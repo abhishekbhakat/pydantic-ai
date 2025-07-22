@@ -12,6 +12,7 @@ from typing_extensions import assert_never
 
 from .. import UnexpectedModelBehavior, _utils, usage
 from .._output import OutputObjectDefinition
+from .._run_context import RunContext
 from ..exceptions import UserError
 from ..messages import (
     BinaryContent,
@@ -187,6 +188,7 @@ class GoogleModel(Model):
         messages: list[ModelMessage],
         model_settings: ModelSettings | None,
         model_request_parameters: ModelRequestParameters,
+        run_context: RunContext[Any] | None = None,
     ) -> AsyncIterator[StreamedResponse]:
         check_allow_model_requests()
         model_settings = cast(GoogleModelSettings, model_settings or {})
