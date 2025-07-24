@@ -24,7 +24,7 @@ from ..messages import (
 from ..models import Model, ModelRequestParameters, StreamedResponse
 from ..settings import ModelSettings
 from ..usage import Usage
-from . import TemporalSettings
+from ._settings import TemporalSettings
 
 
 @dataclass

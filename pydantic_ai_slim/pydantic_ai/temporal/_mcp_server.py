@@ -9,7 +9,7 @@ from temporalio import activity, workflow
 
 from pydantic_ai.mcp import MCPServer, ToolResult
 
-from . import TemporalSettings
+from ._settings import TemporalSettings
 
 
 @dataclass

@@ -10,7 +10,7 @@ from pydantic_ai.toolsets.function import FunctionToolset
 
 from .._run_context import RunContext
 from ..toolsets import ToolsetTool
-from . import TemporalSettings
+from ._settings import TemporalSettings
 
 
 @dataclass
