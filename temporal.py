@@ -114,12 +114,12 @@ async def main():
         workflow_runner=SandboxedWorkflowRunner(  # TODO: Use WorkerPlugin.configure_worker for this, see https://github.com/temporalio/sdk-python/blob/da6616a93e9ee5170842bb5a056e2383e18d07c6/tests/test_plugins.py#L71
             restrictions=SandboxRestrictions.default.with_passthrough_modules(
                 'pydantic_ai',
-                'logfire',  # TODO: Only if module available?
+                'logfire',
                 # Imported inside `logfire._internal.json_encoder` when running `logfire.info` inside an activity with attributes to serialize
                 'attrs',
                 # Imported inside `logfire._internal.json_schema` when running `logfire.info` inside an activity with attributes to serialize
-                'numpy',  # TODO: Only if module available?
-                'pandas',  # TODO: Only if module available?
+                'numpy',
+                'pandas',
             ),
         ),
     ):
