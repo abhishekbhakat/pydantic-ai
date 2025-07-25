@@ -23,26 +23,27 @@ class _CallToolParams:
 def temporalize_mcp_server(
     server: MCPServer,
     settings: TemporalSettings | None = None,
+    tool_settings: dict[str, TemporalSettings] = {},
 ) -> list[Callable[..., Any]]:
     """Temporalize an MCP server.
 
     Args:
         server: The MCP server to temporalize.
         settings: The temporal settings to use.
+        tool_settings: The temporal settings to use for each tool.
     """
     if activities := getattr(server, '__temporal_activities', None):
         return activities
 
     id = server.id
-    if not id:
-        raise ValueError(
-            "An MCP server needs to have an ID in order to be used in a durable execution environment like Temporal. The ID will be used to identify the server's activities within the workflow."
-        )
+    assert id is not None
 
     settings = settings or TemporalSettings()
 
     original_list_tools = server.list_tools
     original_direct_call_tool = server.direct_call_tool
+    setattr(server, '__original_list_tools', original_list_tools)
+    setattr(server, '__original_direct_call_tool', original_direct_call_tool)
 
     @activity.defn(name=f'mcp_server__{id}__list_tools')
     async def list_tools_activity() -> list[mcp_types.Tool]:
@@ -66,7 +67,7 @@ def temporalize_mcp_server(
         return await workflow.execute_activity(  # pyright: ignore[reportUnknownMemberType]
             activity=call_tool_activity,
             arg=_CallToolParams(name=name, tool_args=args, metadata=metadata),
-            **settings.for_tool(id, name).execute_activity_options,
+            **tool_settings.get(name, settings).execute_activity_options,
         )
 
     server.list_tools = list_tools
@@ -75,3 +76,20 @@ def temporalize_mcp_server(
     activities = [list_tools_activity, call_tool_activity]
     setattr(server, '__temporal_activities', activities)
     return activities
+
+
+def untemporalize_mcp_server(server: MCPServer) -> None:
+    """Untemporalize an MCP server.
+
+    Args:
+        server: The MCP server to untemporalize.
+    """
+    if not hasattr(server, '__temporal_activities'):
+        return
+
+    server.list_tools = getattr(server, '__original_list_tools')
+    server.direct_call_tool = getattr(server, '__original_direct_call_tool')
+    delattr(server, '__original_list_tools')
+    delattr(server, '__original_direct_call_tool')
+
+    delattr(server, '__temporal_activities')

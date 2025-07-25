@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, replace
 from datetime import timedelta
 from typing import Any, Callable
 
@@ -9,7 +9,7 @@ from temporalio.workflow import ActivityCancellationType, VersioningIntent
 
 from pydantic_ai._run_context import RunContext
 
-from ._run_context import TemporalRunContext
+from ._run_context import deserialize_run_context_deps, serialize_run_context_deps
 
 
 @dataclass
@@ -29,16 +29,8 @@ class TemporalSettings:
     summary: str | None = None
     priority: Priority = Priority.default
 
-    # Pydantic AI specific
-    tool_settings: dict[str, dict[str, TemporalSettings]] | None = None
-
-    def for_tool(self, toolset_id: str, tool_id: str) -> TemporalSettings:
-        if self.tool_settings is None:
-            return self
-        return self.tool_settings.get(toolset_id, {}).get(tool_id, self)
-
-    serialize_run_context: Callable[[RunContext], Any] = TemporalRunContext.serialize_run_context
-    deserialize_run_context: Callable[[dict[str, Any]], RunContext] = TemporalRunContext.deserialize_run_context
+    serialize_run_context: Callable[[RunContext], dict[str, Any]] = serialize_run_context_deps
+    deserialize_run_context: Callable[[dict[str, Any]], dict[str, Any]] = deserialize_run_context_deps
 
     @property
     def execute_activity_options(self) -> dict[str, Any]:
@@ -55,3 +47,9 @@ class TemporalSettings:
             'summary': self.summary,
             'priority': self.priority,
         }
+
+    def merge(self, other: TemporalSettings | None) -> TemporalSettings:
+        """Merge non-default values from another TemporalSettings instance into this one, returning a new instance."""
+        if not other:
+            return self
+        return replace(self, **{f.name: value for f in fields(other) if (value := getattr(other, f.name)) != f.default})

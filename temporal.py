@@ -10,38 +10,22 @@ from temporalio.worker import Worker
 from typing_extensions import TypedDict
 
 from pydantic_ai import Agent, RunContext
-from pydantic_ai.mcp import MCPServerStdio
-from pydantic_ai.messages import AgentStreamEvent, HandleResponseEvent
-from pydantic_ai.temporal import (
+from pydantic_ai.ext.temporal import (
     AgentPlugin,
     LogfirePlugin,
     PydanticAIPlugin,
     TemporalSettings,
+    temporalize_agent,
 )
-from pydantic_ai.toolsets import FunctionToolset
+from pydantic_ai.mcp import MCPServerStdio
+from pydantic_ai.messages import AgentStreamEvent, HandleResponseEvent
 
 
 class Deps(TypedDict):
     country: str
 
 
-def get_country(ctx: RunContext[Deps]) -> str:
-    return ctx.deps['country']
-
-
-toolset = FunctionToolset[Deps](tools=[get_country], id='country')
-mcp_server = MCPServerStdio(
-    'python',
-    ['-m', 'tests.mcp_server'],
-    timeout=20,
-    id='test',
-)
-
-
-async def event_stream_handler(
-    ctx: RunContext[Deps],
-    stream: AsyncIterable[AgentStreamEvent | HandleResponseEvent],
-):
+async def event_stream_handler(ctx: RunContext[Deps], stream: AsyncIterable[AgentStreamEvent | HandleResponseEvent]):
     logfire.info(f'{ctx.run_step=}')
     async for event in stream:
         logfire.info(f'{event=}')
@@ -49,22 +33,31 @@ async def event_stream_handler(
 
 agent = Agent(
     'openai:gpt-4o',
-    toolsets=[toolset, mcp_server],
-    event_stream_handler=event_stream_handler,
     deps_type=Deps,
+    toolsets=[MCPServerStdio('python', ['-m', 'tests.mcp_server'], timeout=20, id='test')],
+    event_stream_handler=event_stream_handler,
 )
 
-temporal_settings = TemporalSettings(
-    start_to_close_timeout=timedelta(seconds=60),
-    tool_settings={  # TODO: Allow default temporal settings to be set for all activities in a toolset
+
+@agent.tool
+def get_country(ctx: RunContext[Deps]) -> str:
+    return ctx.deps['country']
+
+
+# This needs to be called in the same scope where the `agent` is bound to the workflow,
+# as it modifies the `agent` object in place to swap out methods that use IO for ones that use Temporal activities.
+temporalize_agent(
+    agent,
+    settings=TemporalSettings(start_to_close_timeout=timedelta(seconds=60)),
+    toolset_settings={
+        'country': TemporalSettings(start_to_close_timeout=timedelta(seconds=120)),
+    },
+    tool_settings={
         'country': {
-            'get_country': TemporalSettings(start_to_close_timeout=timedelta(seconds=110)),
+            'get_country': TemporalSettings(start_to_close_timeout=timedelta(seconds=180)),
         },
     },
 )
-
-
-TASK_QUEUE = 'pydantic-ai-agent-task-queue'
 
 
 @workflow.defn
@@ -75,22 +68,26 @@ class MyAgentWorkflow:
         return result.output
 
 
-# TODO: For some reason, when I put this (specifically the temporalize_agent call) inside `async def main()`,
-# we get tons of errors.
-plugin = AgentPlugin(agent, temporal_settings)
+TASK_QUEUE = 'pydantic-ai-agent-task-queue'
+
+
+def setup_logfire():
+    logfire.configure(console=False)
+    logfire.instrument_pydantic_ai()
+    logfire.instrument_httpx(capture_all=True)
 
 
 async def main():
     client = await Client.connect(
         'localhost:7233',
-        plugins=[PydanticAIPlugin(), LogfirePlugin()],
+        plugins=[PydanticAIPlugin(), LogfirePlugin(setup_logfire)],
     )
 
     async with Worker(
         client,
         task_queue=TASK_QUEUE,
         workflows=[MyAgentWorkflow],
-        plugins=[plugin],
+        plugins=[AgentPlugin(agent)],
     ):
         output = await client.execute_workflow(  # pyright: ignore[reportUnknownMemberType]
             MyAgentWorkflow.run,

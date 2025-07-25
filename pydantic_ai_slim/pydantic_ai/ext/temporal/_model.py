@@ -9,10 +9,10 @@ from typing import Any, Callable
 from pydantic import ConfigDict, with_config
 from temporalio import activity, workflow
 
-from .._run_context import RunContext
-from ..agent import EventStreamHandler
-from ..exceptions import UserError
-from ..messages import (
+from pydantic_ai._run_context import RunContext
+from pydantic_ai.agent import EventStreamHandler
+from pydantic_ai.exceptions import UserError
+from pydantic_ai.messages import (
     FinalResultEvent,
     ModelMessage,
     ModelResponse,
@@ -21,9 +21,11 @@ from ..messages import (
     TextPart,
     ToolCallPart,
 )
-from ..models import Model, ModelRequestParameters, StreamedResponse
-from ..settings import ModelSettings
-from ..usage import Usage
+from pydantic_ai.models import Model, ModelRequestParameters, StreamedResponse
+from pydantic_ai.settings import ModelSettings
+from pydantic_ai.usage import Usage
+
+from ._run_context import TemporalRunContext
 from ._settings import TemporalSettings
 
 
@@ -84,13 +86,18 @@ def temporalize_model(  # noqa: C901
     original_request = model.request
     original_request_stream = model.request_stream
 
+    setattr(model, '__original_request', original_request)
+    setattr(model, '__original_request_stream', original_request_stream)
+
     @activity.defn(name='model_request')
     async def request_activity(params: _RequestParams) -> ModelResponse:
         return await original_request(params.messages, params.model_settings, params.model_request_parameters)
 
     @activity.defn(name='model_request_stream')
     async def request_stream_activity(params: _RequestParams) -> ModelResponse:
-        run_context = settings.deserialize_run_context(params.serialized_run_context)
+        run_context = TemporalRunContext.deserialize_run_context(
+            params.serialized_run_context, settings.deserialize_run_context
+        )
         async with original_request_stream(
             params.messages, params.model_settings, params.model_request_parameters, run_context
         ) as streamed_response:
@@ -102,6 +109,7 @@ def temporalize_model(  # noqa: C901
                 ]
             }
 
+            # Keep in sync with `AgentStream.__aiter__`
             async def aiter():
                 def _get_final_result_event(e: ModelResponseStreamEvent) -> FinalResultEvent | None:
                     """Return an appropriate FinalResultEvent if `e` corresponds to a part that will produce a final result."""
@@ -119,9 +127,9 @@ def temporalize_model(  # noqa: C901
                             elif tool_def.kind == 'deferred':
                                 return FinalResultEvent(tool_name=None, tool_call_id=None)
 
-                # TODO: usage_checking_stream = _get_usage_checking_stream_response(
-                #     self._raw_stream_response, self._usage_limits, self.usage
-                # )
+                # `AgentStream.__aiter__`, which this is based on, calls `_get_usage_checking_stream_response` here,
+                # but we don't have access to the `_usage_limits`.
+
                 async for event in streamed_response:
                     yield event
                     if (final_result_event := _get_final_result_event(event)) is not None:
@@ -168,7 +176,7 @@ def temporalize_model(  # noqa: C901
         if run_context is None:
             raise UserError('Streaming with Temporal requires `request_stream` to be called with a `run_context`')
 
-        serialized_run_context = settings.serialize_run_context(run_context)
+        serialized_run_context = TemporalRunContext.serialize_run_context(run_context, settings.serialize_run_context)
         response = await workflow.execute_activity(  # pyright: ignore[reportUnknownMemberType]
             activity=request_stream_activity,
             arg=_RequestParams(
@@ -187,3 +195,20 @@ def temporalize_model(  # noqa: C901
     activities = [request_activity, request_stream_activity]
     setattr(model, '__temporal_activities', activities)
     return activities
+
+
+def untemporalize_model(model: Model) -> None:
+    """Untemporalize a model.
+
+    Args:
+        model: The model to untemporalize.
+    """
+    if not hasattr(model, '__temporal_activities'):
+        return
+
+    model.request = getattr(model, '__original_request')
+    model.request_stream = getattr(model, '__original_request_stream')
+
+    delattr(model, '__original_request')
+    delattr(model, '__original_request_stream')
+    delattr(model, '__temporal_activities')
