@@ -207,19 +207,24 @@ class MCPServer(AbstractToolset[Any], ABC):
 
     async def get_tools(self, ctx: RunContext[Any]) -> dict[str, ToolsetTool[Any]]:
         return {
-            name: ToolsetTool(
-                toolset=self,
-                tool_def=ToolDefinition(
+            name: self._toolset_tool_for_tool_def(
+                ToolDefinition(
                     name=name,
                     description=mcp_tool.description,
                     parameters_json_schema=mcp_tool.inputSchema,
                 ),
-                max_retries=self.max_retries,
-                args_validator=TOOL_SCHEMA_VALIDATOR,
             )
             for mcp_tool in await self.list_tools()
             if (name := f'{self.tool_prefix}_{mcp_tool.name}' if self.tool_prefix else mcp_tool.name)
         }
+
+    def _toolset_tool_for_tool_def(self, tool_def: ToolDefinition) -> ToolsetTool[Any]:
+        return ToolsetTool(
+            toolset=self,
+            tool_def=tool_def,
+            max_retries=self.max_retries,
+            args_validator=TOOL_SCHEMA_VALIDATOR,
+        )
 
     async def __aenter__(self) -> Self:
         """Enter the MCP server context.

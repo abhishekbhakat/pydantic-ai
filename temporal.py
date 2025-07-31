@@ -59,6 +59,9 @@ temporalize_agent(
     },
 )
 
+with workflow.unsafe.imports_passed_through():
+    import pandas  # noqa: F401
+
 
 @workflow.defn
 class MyAgentWorkflow:
