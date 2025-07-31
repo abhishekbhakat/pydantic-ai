@@ -33,15 +33,10 @@ async def event_stream_handler(ctx: RunContext[Deps], stream: AsyncIterable[Agen
         logfire.info(f'{event=}')
 
 
-toolset = FunctionToolset[Deps](id='toolset')
-
-
-@toolset.tool
 async def get_country(ctx: RunContext[Deps]) -> str:
     return ctx.deps['country']
 
 
-@toolset.tool
 def get_weather(city: str) -> str:
     return 'sunny'
 
@@ -49,7 +44,11 @@ def get_weather(city: str) -> str:
 agent = Agent(
     'openai:gpt-4o',
     deps_type=Deps,
-    toolsets=[toolset, MCPServerStdio('python', ['-m', 'tests.mcp_server'], timeout=20, id='mcp')],
+    toolsets=[
+        FunctionToolset[Deps](tools=[get_weather], id='toolset'),
+        MCPServerStdio('python', ['-m', 'tests.mcp_server'], timeout=20, id='mcp'),
+    ],
+    tools=[get_country],
     event_stream_handler=event_stream_handler,
 )
 

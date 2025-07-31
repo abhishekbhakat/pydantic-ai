@@ -156,6 +156,9 @@ class Agent(Generic[AgentDepsT, OutputDataT]):
     instrument: InstrumentationSettings | bool | None
     """Options to automatically instrument with OpenTelemetry."""
 
+    event_stream_handler: EventStreamHandler[AgentDepsT] | None
+    """Optional handler for events from the agent stream."""
+
     _instrument_default: ClassVar[InstrumentationSettings | bool] = False
 
     _deps_type: type[AgentDepsT] = dataclasses.field(repr=False)
@@ -176,7 +179,6 @@ class Agent(Generic[AgentDepsT, OutputDataT]):
     _prepare_tools: ToolsPrepareFunc[AgentDepsT] | None = dataclasses.field(repr=False)
     _prepare_output_tools: ToolsPrepareFunc[AgentDepsT] | None = dataclasses.field(repr=False)
     _max_result_retries: int = dataclasses.field(repr=False)
-    _event_stream_handler: EventStreamHandler[AgentDepsT] | None = dataclasses.field(repr=False)
 
     _enter_lock: Lock = dataclasses.field(repr=False)
     _entered_count: int = dataclasses.field(repr=False)
@@ -438,13 +440,16 @@ class Agent(Generic[AgentDepsT, OutputDataT]):
 
         self.history_processors = history_processors or []
 
-        self._event_stream_handler = event_stream_handler
+        self.event_stream_handler = event_stream_handler
 
         self._override_deps: ContextVar[_utils.Option[AgentDepsT]] = ContextVar('_override_deps', default=None)
         self._override_model: ContextVar[_utils.Option[models.Model]] = ContextVar('_override_model', default=None)
         self._override_toolsets: ContextVar[_utils.Option[Sequence[AbstractToolset[AgentDepsT]]]] = ContextVar(
             '_override_toolsets', default=None
         )
+        self._override_tools: ContextVar[
+            _utils.Option[Sequence[Tool[AgentDepsT] | ToolFuncEither[AgentDepsT, ...]]]
+        ] = ContextVar('_override_tools', default=None)
 
         self._enter_lock = _utils.get_async_lock()
         self._entered_count = 0
@@ -575,11 +580,11 @@ class Agent(Generic[AgentDepsT, OutputDataT]):
             toolsets=toolsets,
         ) as agent_run:
             async for node in agent_run:
-                if self._event_stream_handler is not None and (
+                if self.event_stream_handler is not None and (
                     self.is_model_request_node(node) or self.is_call_tools_node(node)
                 ):
                     async with node.stream(agent_run.ctx) as stream:
-                        await self._event_stream_handler(_agent_graph.build_run_context(agent_run.ctx), stream)
+                        await self.event_stream_handler(_agent_graph.build_run_context(agent_run.ctx), stream)
 
         assert agent_run.result is not None, 'The graph run did not finish properly'
         return agent_run.result
@@ -1210,6 +1215,7 @@ class Agent(Generic[AgentDepsT, OutputDataT]):
         deps: AgentDepsT | _utils.Unset = _utils.UNSET,
         model: models.Model | models.KnownModelName | str | _utils.Unset = _utils.UNSET,
         toolsets: Sequence[AbstractToolset[AgentDepsT]] | _utils.Unset = _utils.UNSET,
+        tools: Sequence[Tool[AgentDepsT] | ToolFuncEither[AgentDepsT, ...]] | _utils.Unset = _utils.UNSET,
     ) -> Iterator[None]:
         """Context manager to temporarily override agent dependencies, model, or toolsets.
 
@@ -1220,6 +1226,7 @@ class Agent(Generic[AgentDepsT, OutputDataT]):
             deps: The dependencies to use instead of the dependencies passed to the agent run.
             model: The model to use instead of the model passed to the agent run.
             toolsets: The toolsets to use instead of the toolsets passed to the agent constructor and agent run.
+            tools: The tools to use instead of the tools registered with the agent.
         """
         if _utils.is_set(deps):
             deps_token = self._override_deps.set(_utils.Some(deps))
@@ -1236,6 +1243,11 @@ class Agent(Generic[AgentDepsT, OutputDataT]):
         else:
             toolsets_token = None
 
+        if _utils.is_set(tools):
+            tools_token = self._override_tools.set(_utils.Some(tools))
+        else:
+            tools_token = None
+
         try:
             yield
         finally:
@@ -1245,6 +1257,8 @@ class Agent(Generic[AgentDepsT, OutputDataT]):
                 self._override_model.reset(model_token)
             if toolsets_token is not None:
                 self._override_toolsets.reset(toolsets_token)
+            if tools_token is not None:
+                self._override_tools.reset(tools_token)
 
     @overload
     def instructions(
@@ -1697,6 +1711,13 @@ class Agent(Generic[AgentDepsT, OutputDataT]):
             output_toolset: The output toolset to use instead of the one built at agent construction time.
             additional_toolsets: Additional toolsets to add.
         """
+        if some_tools := self._override_tools.get():
+            function_toolset = FunctionToolset(
+                some_tools.value, max_retries=self._function_toolset.max_retries, id='agent'
+            )
+        else:
+            function_toolset = self._function_toolset
+
         if some_user_toolsets := self._override_toolsets.get():
             user_toolsets = some_user_toolsets.value
         elif additional_toolsets is not None:
@@ -1704,7 +1725,7 @@ class Agent(Generic[AgentDepsT, OutputDataT]):
         else:
             user_toolsets = self._user_toolsets
 
-        all_toolsets = [self._function_toolset, *user_toolsets]
+        all_toolsets = [function_toolset, *user_toolsets]
 
         if self._prepare_tools:
             all_toolsets = [PreparedToolset(CombinedToolset(all_toolsets), self._prepare_tools)]

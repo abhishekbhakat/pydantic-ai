@@ -11,9 +11,9 @@ from pydantic_ai._run_context import RunContext
 from pydantic_ai.exceptions import UserError
 from pydantic_ai.toolsets import FunctionToolset, ToolsetTool
 from pydantic_ai.toolsets.function import _FunctionToolsetTool  # pyright: ignore[reportPrivateUsage]
-from pydantic_ai.toolsets.wrapper import WrapperToolset
 
 from ._run_context import TemporalRunContext
+from ._toolset import TemporalWrapperToolset
 
 
 @dataclass
@@ -24,7 +24,7 @@ class _CallToolParams:
     serialized_run_context: Any
 
 
-class TemporalFunctionToolset(WrapperToolset[Any]):
+class TemporalFunctionToolset(TemporalWrapperToolset):
     def __init__(
         self,
         toolset: FunctionToolset,
@@ -47,7 +47,7 @@ class TemporalFunctionToolset(WrapperToolset[Any]):
             try:
                 tool = (await toolset.get_tools(ctx))[name]
             except KeyError as e:
-                raise ValueError(
+                raise UserError(
                     f'Tool {name!r} not found in toolset {toolset.id!r}. '
                     'Removing or renaming tools during an agent run is not supported with Temporal.'
                 ) from e
@@ -62,7 +62,7 @@ class TemporalFunctionToolset(WrapperToolset[Any]):
         return self.wrapped
 
     @property
-    def activities(self) -> list[Callable[..., Any]]:
+    def temporal_activities(self) -> list[Callable[..., Any]]:
         return [self.call_tool_activity]
 
     def tool(self, *args: Any, **kwargs: Any) -> Any:
@@ -75,6 +75,9 @@ class TemporalFunctionToolset(WrapperToolset[Any]):
         return self.wrapped_function_toolset.add_tool(*args, **kwargs)
 
     async def call_tool(self, name: str, tool_args: dict[str, Any], ctx: RunContext, tool: ToolsetTool) -> Any:
+        if not workflow.in_workflow():
+            return await super().call_tool(name, tool_args, ctx, tool)
+
         tool_activity_config = self.tool_activity_config.get(name, {})
         if tool_activity_config is False:
             assert isinstance(tool, _FunctionToolsetTool)

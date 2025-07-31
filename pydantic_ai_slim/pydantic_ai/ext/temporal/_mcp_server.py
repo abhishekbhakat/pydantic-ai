@@ -12,9 +12,9 @@ from pydantic_ai.exceptions import UserError
 from pydantic_ai.mcp import MCPServer, ToolResult
 from pydantic_ai.tools import ToolDefinition
 from pydantic_ai.toolsets.abstract import ToolsetTool
-from pydantic_ai.toolsets.wrapper import WrapperToolset
 
 from ._run_context import TemporalRunContext
+from ._toolset import TemporalWrapperToolset
 
 
 @dataclass
@@ -32,7 +32,7 @@ class _CallToolParams:
     tool_def: ToolDefinition
 
 
-class TemporalMCPServer(WrapperToolset[Any]):
+class TemporalMCPServer(TemporalWrapperToolset):
     def __init__(
         self,
         server: MCPServer,
@@ -73,10 +73,13 @@ class TemporalMCPServer(WrapperToolset[Any]):
         return self.wrapped
 
     @property
-    def activities(self) -> list[Callable[..., Any]]:
+    def temporal_activities(self) -> list[Callable[..., Any]]:
         return [self.get_tools_activity, self.call_tool_activity]
 
     async def get_tools(self, ctx: RunContext[Any]) -> dict[str, ToolsetTool[Any]]:
+        if not workflow.in_workflow():
+            return await super().get_tools(ctx)
+
         serialized_run_context = self.run_context_type.serialize_run_context(ctx)
         tool_defs = await workflow.execute_activity(  # pyright: ignore[reportUnknownMemberType]
             activity=self.get_tools_activity,
@@ -95,6 +98,9 @@ class TemporalMCPServer(WrapperToolset[Any]):
         ctx: RunContext[Any],
         tool: ToolsetTool[Any],
     ) -> ToolResult:
+        if not workflow.in_workflow():
+            return await super().call_tool(name, tool_args, ctx, tool)
+
         tool_activity_config = self.tool_activity_config.get(name, {})
         if tool_activity_config is False:
             raise UserError('Disabling running an MCP tool in a Temporal activity is not possible.')

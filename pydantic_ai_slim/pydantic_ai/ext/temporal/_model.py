@@ -144,7 +144,7 @@ class TemporalModel(WrapperModel):
         self.request_stream_activity = request_stream_activity
 
     @property
-    def activities(self) -> list[Callable[..., Any]]:
+    def temporal_activities(self) -> list[Callable[..., Any]]:
         return [self.request_activity, self.request_stream_activity]
 
     async def request(
@@ -153,6 +153,9 @@ class TemporalModel(WrapperModel):
         model_settings: ModelSettings | None,
         model_request_parameters: ModelRequestParameters,
     ) -> ModelResponse:
+        if not workflow.in_workflow():
+            return await super().request(messages, model_settings, model_request_parameters)
+
         return await workflow.execute_activity(  # pyright: ignore[reportUnknownMemberType]
             activity=self.request_activity,
             arg=_RequestParams(

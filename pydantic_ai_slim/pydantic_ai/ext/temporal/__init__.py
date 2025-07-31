@@ -12,6 +12,7 @@ from temporalio.worker import Plugin as WorkerPlugin, WorkerConfig
 from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner
 
 from pydantic_ai.agent import Agent
+from pydantic_ai.exceptions import UserError
 
 from ._agent import temporalize_agent
 from ._logfire import LogfirePlugin
@@ -69,7 +70,7 @@ class AgentPlugin(WorkerPlugin):
     def configure_worker(self, config: WorkerConfig) -> WorkerConfig:
         agent_activities = getattr(self.agent, '__temporal_activities', None)
         if agent_activities is None:
-            raise ValueError('The agent has not been prepared for Temporal yet, call `temporalize_agent(agent)` first.')
+            raise UserError('The agent has not been prepared for Temporal yet, call `temporalize_agent(agent)` first.')
 
         activities: Sequence[Callable[..., Any]] = config.get('activities', [])  # pyright: ignore[reportUnknownMemberType]
         config['activities'] = [*activities, *agent_activities]

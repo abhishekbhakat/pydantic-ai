@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Literal
+from abc import ABC, abstractmethod
+from typing import Any, Callable, Literal
 
 from temporalio.workflow import ActivityConfig
 
@@ -8,9 +9,14 @@ from pydantic_ai.ext.temporal._run_context import TemporalRunContext
 from pydantic_ai.mcp import MCPServer
 from pydantic_ai.toolsets.abstract import AbstractToolset
 from pydantic_ai.toolsets.function import FunctionToolset
+from pydantic_ai.toolsets.wrapper import WrapperToolset
 
-from ._function_toolset import TemporalFunctionToolset
-from ._mcp_server import TemporalMCPServer
+
+class TemporalWrapperToolset(WrapperToolset[Any], ABC):
+    @property
+    @abstractmethod
+    def temporal_activities(self) -> list[Callable[..., Any]]:
+        raise NotImplementedError
 
 
 def temporalize_toolset(
@@ -28,8 +34,12 @@ def temporalize_toolset(
         run_context_type: The type of run context to use to serialize and deserialize the run context.
     """
     if isinstance(toolset, FunctionToolset):
+        from ._function_toolset import TemporalFunctionToolset
+
         return TemporalFunctionToolset(toolset, activity_config, tool_activity_config, run_context_type)
     elif isinstance(toolset, MCPServer):
+        from ._mcp_server import TemporalMCPServer
+
         return TemporalMCPServer(toolset, activity_config, tool_activity_config, run_context_type)
     else:
         return toolset

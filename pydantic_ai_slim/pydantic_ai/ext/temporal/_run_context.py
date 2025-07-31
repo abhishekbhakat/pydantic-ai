@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from pydantic_ai._run_context import RunContext
+from pydantic_ai.exceptions import UserError
 
 
 class TemporalRunContext(RunContext[Any]):
@@ -45,7 +46,7 @@ class TemporalRunContextWithDeps(TemporalRunContext):
     @classmethod
     def serialize_run_context(cls, ctx: RunContext[Any]) -> dict[str, Any]:
         if not isinstance(ctx.deps, dict):
-            raise ValueError(
+            raise UserError(
                 'The `deps` object must be a JSON-serializable dictionary in order to be used with Temporal. '
                 'To use a different type, pass a `TemporalRunContext` subclass to `temporalize_agent` with custom `serialize_run_context` and `deserialize_run_context` class methods.'
             )
