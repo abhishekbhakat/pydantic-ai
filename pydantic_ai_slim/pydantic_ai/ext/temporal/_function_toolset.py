@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, cast
+from typing import Any, Callable, Literal
 
 from pydantic import ConfigDict, with_config
 from temporalio import activity, workflow
 
 from pydantic_ai._run_context import RunContext
+from pydantic_ai.exceptions import UserError
 from pydantic_ai.toolsets import FunctionToolset, ToolsetTool
+from pydantic_ai.toolsets.function import _FunctionToolsetTool  # pyright: ignore[reportPrivateUsage]
 from pydantic_ai.toolsets.wrapper import WrapperToolset
 
 from ._run_context import TemporalRunContext
@@ -27,7 +29,7 @@ class TemporalFunctionToolset(WrapperToolset[Any]):
         self,
         toolset: FunctionToolset,
         settings: TemporalSettings | None = None,
-        tool_settings: dict[str, TemporalSettings] = {},
+        tool_settings: dict[str, TemporalSettings | Literal[False]] = {},
     ):
         super().__init__(toolset)
         self.settings = settings or TemporalSettings()
@@ -39,7 +41,9 @@ class TemporalFunctionToolset(WrapperToolset[Any]):
         @activity.defn(name=f'function_toolset__{id}__call_tool')
         async def call_tool_activity(params: _CallToolParams) -> Any:
             name = params.name
-            settings_for_tool = self.settings.merge(self.tool_settings.get(name))
+            settings_for_tool = self.tool_settings.get(name)
+            assert isinstance(settings_for_tool, TemporalSettings)
+            settings_for_tool = self.settings.merge(settings_for_tool)
             ctx = TemporalRunContext.deserialize_run_context(
                 params.serialized_run_context, settings_for_tool.deserialize_run_context
             )
@@ -57,7 +61,8 @@ class TemporalFunctionToolset(WrapperToolset[Any]):
 
     @property
     def wrapped_function_toolset(self) -> FunctionToolset:
-        return cast(FunctionToolset, self.wrapped)
+        assert isinstance(self.wrapped, FunctionToolset)
+        return self.wrapped
 
     @property
     def activities(self) -> list[Callable[..., Any]]:
@@ -73,7 +78,16 @@ class TemporalFunctionToolset(WrapperToolset[Any]):
         return self.wrapped_function_toolset.add_tool(*args, **kwargs)
 
     async def call_tool(self, name: str, tool_args: dict[str, Any], ctx: RunContext, tool: ToolsetTool) -> Any:
-        settings_for_tool = self.settings.merge(self.tool_settings.get(name))
+        settings_for_tool = self.tool_settings.get(name)
+        if settings_for_tool is False:
+            assert isinstance(tool, _FunctionToolsetTool)
+            if not tool.is_async:
+                raise UserError(
+                    'Disabling running a non-async tool in a Temporal activity is not possible. Make the tool function async instead.'
+                )
+            return await super().call_tool(name, tool_args, ctx, tool)
+
+        settings_for_tool = self.settings.merge(settings_for_tool)
         serialized_run_context = TemporalRunContext.serialize_run_context(ctx, settings_for_tool.serialize_run_context)
         return await workflow.execute_activity(  # pyright: ignore[reportUnknownMemberType]
             activity=self.call_tool_activity,

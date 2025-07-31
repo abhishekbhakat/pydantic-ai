@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Callable, cast
+from typing import Any, Callable, Literal, cast
 
 from pydantic_ai.agent import Agent
 from pydantic_ai.models import Model
@@ -16,9 +16,9 @@ def temporalize_agent(
     agent: Agent[Any, Any],
     settings: TemporalSettings | None = None,
     toolset_settings: dict[str, TemporalSettings] = {},
-    tool_settings: dict[str, dict[str, TemporalSettings]] = {},
+    tool_settings: dict[str, dict[str, TemporalSettings | Literal[False]]] = {},
     temporalize_toolset_func: Callable[
-        [AbstractToolset, TemporalSettings | None, dict[str, TemporalSettings]], AbstractToolset
+        [AbstractToolset, TemporalSettings | None, dict[str, TemporalSettings | Literal[False]]], AbstractToolset
     ] = temporalize_toolset,
 ) -> list[Callable[..., Any]]:
     """Temporalize an agent.
@@ -73,7 +73,9 @@ def temporalize_agent(
             raise ValueError(
                 'Toolsets cannot be set at agent run time when using Temporal, it must be set at agent creation time.'
             )
-        if kwargs.get('event_stream_handler') is not None:
+        if (
+            kwargs.get('event_stream_handler') is not None
+        ):  # TODO: iter won't have event_stream_handler, run/_sync/_stream will
             raise ValueError(
                 'Event stream handler cannot be set at agent run time when using Temporal, it must be set at agent creation time.'
             )

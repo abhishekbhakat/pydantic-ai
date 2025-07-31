@@ -24,6 +24,7 @@ class _FunctionToolsetTool(ToolsetTool[AgentDepsT]):
     """A tool definition for a function toolset tool that keeps track of the function to call."""
 
     call_func: Callable[[dict[str, Any], RunContext[AgentDepsT]], Awaitable[Any]]
+    is_async: bool
 
 
 @dataclass(init=False)
@@ -240,6 +241,7 @@ class FunctionToolset(AbstractToolset[AgentDepsT]):
                 max_retries=tool.max_retries if tool.max_retries is not None else self.max_retries,
                 args_validator=tool.function_schema.validator,
                 call_func=tool.function_schema.call,
+                is_async=tool.function_schema.is_async,
             )
         return tools
 

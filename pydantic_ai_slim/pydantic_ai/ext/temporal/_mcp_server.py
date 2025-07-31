@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, cast
+from typing import Any, Callable, Literal
 
 from pydantic import ConfigDict, with_config
 from temporalio import activity, workflow
 
 from pydantic_ai._run_context import RunContext
+from pydantic_ai.exceptions import UserError
 from pydantic_ai.mcp import MCPServer, ToolResult
 from pydantic_ai.tools import ToolDefinition
 from pydantic_ai.toolsets.abstract import ToolsetTool
@@ -36,7 +37,7 @@ class TemporalMCPServer(WrapperToolset[Any]):
         self,
         server: MCPServer,
         settings: TemporalSettings | None = None,
-        tool_settings: dict[str, TemporalSettings] = {},
+        tool_settings: dict[str, TemporalSettings | Literal[False]] = {},
     ):
         super().__init__(server)
         self.settings = settings or TemporalSettings()
@@ -70,7 +71,8 @@ class TemporalMCPServer(WrapperToolset[Any]):
 
     @property
     def wrapped_server(self) -> MCPServer:
-        return cast(MCPServer, self.wrapped)
+        assert isinstance(self.wrapped, MCPServer)
+        return self.wrapped
 
     @property
     def activities(self) -> list[Callable[..., Any]]:
@@ -95,7 +97,12 @@ class TemporalMCPServer(WrapperToolset[Any]):
         ctx: RunContext[Any],
         tool: ToolsetTool[Any],
     ) -> ToolResult:
-        serialized_run_context = TemporalRunContext.serialize_run_context(ctx, self.settings.serialize_run_context)
+        settings_for_tool = self.tool_settings.get(name)
+        if settings_for_tool is False:
+            raise UserError('Disabling running an MCP tool in a Temporal activity is not possible.')
+
+        settings_for_tool = self.settings.merge(settings_for_tool)
+        serialized_run_context = TemporalRunContext.serialize_run_context(ctx, settings_for_tool.serialize_run_context)
         return await workflow.execute_activity(  # pyright: ignore[reportUnknownMemberType]
             activity=self.call_tool_activity,
             arg=_CallToolParams(
@@ -104,5 +111,5 @@ class TemporalMCPServer(WrapperToolset[Any]):
                 serialized_run_context=serialized_run_context,
                 tool_def=tool.tool_def,
             ),
-            **self.tool_settings.get(name, self.settings).execute_activity_options,
+            **settings_for_tool.execute_activity_options,
         )

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic_ai.mcp import MCPServer
 from pydantic_ai.toolsets.abstract import AbstractToolset
 from pydantic_ai.toolsets.function import FunctionToolset
@@ -10,7 +12,9 @@ from ._settings import TemporalSettings
 
 
 def temporalize_toolset(
-    toolset: AbstractToolset, settings: TemporalSettings | None, tool_settings: dict[str, TemporalSettings] = {}
+    toolset: AbstractToolset,
+    settings: TemporalSettings | None,
+    tool_settings: dict[str, TemporalSettings | Literal[False]] = {},
 ) -> AbstractToolset:
     """Temporalize a toolset.
 

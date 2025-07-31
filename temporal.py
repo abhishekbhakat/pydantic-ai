@@ -19,6 +19,7 @@ from pydantic_ai.ext.temporal import (
 )
 from pydantic_ai.mcp import MCPServerStdio
 from pydantic_ai.messages import AgentStreamEvent, HandleResponseEvent
+from pydantic_ai.toolsets.function import FunctionToolset
 
 
 class Deps(TypedDict):
@@ -31,18 +32,25 @@ async def event_stream_handler(ctx: RunContext[Deps], stream: AsyncIterable[Agen
         logfire.info(f'{event=}')
 
 
+toolset = FunctionToolset[Deps](id='toolset')
+
+
+@toolset.tool
+async def get_country(ctx: RunContext[Deps]) -> str:
+    return ctx.deps['country']
+
+
+@toolset.tool
+def get_weather(city: str) -> str:
+    return 'sunny'
+
+
 agent = Agent(
     'openai:gpt-4o',
     deps_type=Deps,
-    toolsets=[MCPServerStdio('python', ['-m', 'tests.mcp_server'], timeout=20, id='test')],
+    toolsets=[toolset, MCPServerStdio('python', ['-m', 'tests.mcp_server'], timeout=20, id='mcp')],
     event_stream_handler=event_stream_handler,
 )
-
-
-@agent.tool
-def get_country(ctx: RunContext[Deps]) -> str:
-    return ctx.deps['country']
-
 
 # This needs to be called in the same scope where the `agent` is bound to the workflow,
 # as it modifies the `agent` object in place to swap out methods that use IO for ones that use Temporal activities.
@@ -53,8 +61,9 @@ temporalize_agent(
         'country': TemporalSettings(start_to_close_timeout=timedelta(seconds=120)),
     },
     tool_settings={
-        'country': {
-            'get_country': TemporalSettings(start_to_close_timeout=timedelta(seconds=180)),
+        'toolset': {
+            'get_country': False,
+            'get_weather': TemporalSettings(start_to_close_timeout=timedelta(seconds=180)),
         },
     },
 )
@@ -95,7 +104,7 @@ async def main():
         output = await client.execute_workflow(  # pyright: ignore[reportUnknownMemberType]
             MyAgentWorkflow.run,
             args=[
-                'what is the capital of the capital of the country? and what is the product name?',
+                'what is the capital of the country? what is the weather there? what is the product name?',
                 Deps(country='Mexico'),
             ],
             id=f'my-agent-workflow-id-{random.random()}',
