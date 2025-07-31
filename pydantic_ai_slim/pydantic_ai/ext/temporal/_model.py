@@ -89,11 +89,13 @@ def temporalize_model(  # noqa: C901
     setattr(model, '__original_request', original_request)
     setattr(model, '__original_request_stream', original_request_stream)
 
-    @activity.defn(name='model_request')
+    id = '_'.join([model.system, model.model_name])
+
+    @activity.defn(name=f'model__{id}__request')
     async def request_activity(params: _RequestParams) -> ModelResponse:
         return await original_request(params.messages, params.model_settings, params.model_request_parameters)
 
-    @activity.defn(name='model_request_stream')
+    @activity.defn(name=f'model__{id}__request_stream')
     async def request_stream_activity(params: _RequestParams) -> ModelResponse:
         run_context = TemporalRunContext.deserialize_run_context(
             params.serialized_run_context, settings.deserialize_run_context
