@@ -439,10 +439,7 @@ class OpenAIModel(Model):
         )
 
     def _get_tools(self, model_request_parameters: ModelRequestParameters) -> list[chat.ChatCompletionToolParam]:
-        tools = [self._map_tool_definition(r) for r in model_request_parameters.function_tools]
-        if model_request_parameters.output_tools:
-            tools += [self._map_tool_definition(r) for r in model_request_parameters.output_tools]
-        return tools
+        return [self._map_tool_definition(r) for r in model_request_parameters.tool_defs.values()]
 
     async def _map_messages(self, messages: list[ModelMessage]) -> list[chat.ChatCompletionMessageParam]:
         """Just maps a `pydantic_ai.Message` to a `openai.types.ChatCompletionMessageParam`."""
@@ -836,10 +833,7 @@ class OpenAIResponsesModel(Model):
         return Reasoning(effort=reasoning_effort, summary=reasoning_summary)
 
     def _get_tools(self, model_request_parameters: ModelRequestParameters) -> list[responses.FunctionToolParam]:
-        tools = [self._map_tool_definition(r) for r in model_request_parameters.function_tools]
-        if model_request_parameters.output_tools:
-            tools += [self._map_tool_definition(r) for r in model_request_parameters.output_tools]
-        return tools
+        return [self._map_tool_definition(r) for r in model_request_parameters.tool_defs.values()]
 
     def _map_tool_definition(self, f: ToolDefinition) -> responses.FunctionToolParam:
         return {

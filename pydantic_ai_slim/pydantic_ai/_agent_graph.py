@@ -303,10 +303,18 @@ class ModelRequestNode(AgentNode[DepsT, NodeRunEndT]):
         self,
         ctx: GraphRunContext[GraphAgentState, GraphAgentDeps[DepsT, T]],
     ) -> AsyncIterator[result.AgentStream[DepsT, T]]:
-        async with self._stream(ctx) as streamed_response:
+        assert not self._did_stream, 'stream() should only be called once per node'
+
+        model_settings, model_request_parameters, message_history, run_context = await self._prepare_request(ctx)
+        async with ctx.deps.model.request_stream(
+            message_history, model_settings, model_request_parameters, run_context
+        ) as streamed_response:
+            self._did_stream = True
+            ctx.state.usage.requests += 1
             agent_stream = result.AgentStream[DepsT, T](
                 streamed_response,
                 ctx.deps.output_schema,
+                model_request_parameters,
                 ctx.deps.output_validators,
                 build_run_context(ctx),
                 ctx.deps.usage_limits,
@@ -318,24 +326,6 @@ class ModelRequestNode(AgentNode[DepsT, NodeRunEndT]):
             async for _ in agent_stream:
                 pass
 
-    @asynccontextmanager
-    async def _stream(
-        self,
-        ctx: GraphRunContext[GraphAgentState, GraphAgentDeps[DepsT, T]],
-    ) -> AsyncIterator[models.StreamedResponse]:
-        assert not self._did_stream, 'stream() should only be called once per node'
-
-        model_settings, model_request_parameters, message_history, run_context = await self._prepare_request(ctx)
-        async with ctx.deps.model.request_stream(
-            message_history, model_settings, model_request_parameters, run_context
-        ) as streamed_response:
-            self._did_stream = True
-            ctx.state.usage.requests += 1
-            yield streamed_response
-            # In case the user didn't manually consume the full stream, ensure it is fully consumed here,
-            # otherwise usage won't be properly counted:
-            async for _ in streamed_response:
-                pass
         model_response = streamed_response.get()
 
         self._finish_handling(ctx, model_response)

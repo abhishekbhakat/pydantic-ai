@@ -206,16 +206,10 @@ class GoogleModel(Model):
         return self._system
 
     def _get_tools(self, model_request_parameters: ModelRequestParameters) -> list[ToolDict] | None:
-        tools: list[ToolDict] = [
+        return [
             ToolDict(function_declarations=[_function_declaration_from_tool(t)])
-            for t in model_request_parameters.function_tools
+            for t in model_request_parameters.tool_defs.values()
         ]
-        if model_request_parameters.output_tools:
-            tools += [
-                ToolDict(function_declarations=[_function_declaration_from_tool(t)])
-                for t in model_request_parameters.output_tools
-            ]
-        return tools or None
 
     def _get_tool_config(
         self, model_request_parameters: ModelRequestParameters, tools: list[ToolDict] | None

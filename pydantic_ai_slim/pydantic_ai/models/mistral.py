@@ -234,11 +234,7 @@ class MistralModel(Model):
         response: MistralEventStreamAsync[MistralCompletionEvent] | None
         mistral_messages = self._map_messages(messages)
 
-        if (
-            model_request_parameters.output_tools
-            and model_request_parameters.function_tools
-            or model_request_parameters.function_tools
-        ):
+        if model_request_parameters.function_tools:
             # Function Calling
             response = await self.client.chat.stream_async(
                 model=str(self._model_name),
@@ -306,16 +302,13 @@ class MistralModel(Model):
 
         Returns None if both function_tools and output_tools are empty.
         """
-        all_tools: list[ToolDefinition] = (
-            model_request_parameters.function_tools + model_request_parameters.output_tools
-        )
         tools = [
             MistralTool(
                 function=MistralFunction(
                     name=r.name, parameters=r.parameters_json_schema, description=r.description or ''
                 )
             )
-            for r in all_tools
+            for r in model_request_parameters.tool_defs.values()
         ]
         return tools if tools else None
 

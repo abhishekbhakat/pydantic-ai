@@ -14,13 +14,9 @@ from pydantic_ai._run_context import RunContext
 from pydantic_ai.agent import EventStreamHandler
 from pydantic_ai.exceptions import UserError
 from pydantic_ai.messages import (
-    FinalResultEvent,
     ModelMessage,
     ModelResponse,
     ModelResponseStreamEvent,
-    PartStartEvent,
-    TextPart,
-    ToolCallPart,
 )
 from pydantic_ai.models import Model, ModelRequestParameters, StreamedResponse
 from pydantic_ai.models.wrapper import WrapperModel
@@ -72,7 +68,7 @@ class TemporalModel(WrapperModel):
         self,
         model: Model,
         activity_config: ActivityConfig = {},
-        event_stream_handler: EventStreamHandler | None = None,
+        event_stream_handler: EventStreamHandler[Any] | None = None,
         run_context_type: type[TemporalRunContext] = TemporalRunContext,
     ):
         super().__init__(model)
@@ -94,38 +90,16 @@ class TemporalModel(WrapperModel):
             async with self.wrapped.request_stream(
                 params.messages, params.model_settings, params.model_request_parameters, run_context
             ) as streamed_response:
-                tool_defs = {
-                    tool_def.name: tool_def
-                    for tool_def in [
-                        *params.model_request_parameters.output_tools,
-                        *params.model_request_parameters.function_tools,
-                    ]
-                }
-
                 # Keep in sync with `AgentStream.__aiter__`
                 async def aiter():
-                    def _get_final_result_event(e: ModelResponseStreamEvent) -> FinalResultEvent | None:
-                        """Return an appropriate FinalResultEvent if `e` corresponds to a part that will produce a final result."""
-                        if isinstance(e, PartStartEvent):
-                            new_part = e.part
-                            if (
-                                isinstance(new_part, TextPart) and params.model_request_parameters.allow_text_output
-                            ):  # pragma: no branch
-                                return FinalResultEvent(tool_name=None, tool_call_id=None)
-                            elif isinstance(new_part, ToolCallPart) and (tool_def := tool_defs.get(new_part.tool_name)):
-                                if tool_def.kind == 'output':
-                                    return FinalResultEvent(
-                                        tool_name=new_part.tool_name, tool_call_id=new_part.tool_call_id
-                                    )
-                                elif tool_def.kind == 'deferred':
-                                    return FinalResultEvent(tool_name=None, tool_call_id=None)
-
                     # `AgentStream.__aiter__`, which this is based on, calls `_get_usage_checking_stream_response` here,
                     # but we don't have access to the `_usage_limits`.
 
                     async for event in streamed_response:
                         yield event
-                        if (final_result_event := _get_final_result_event(event)) is not None:
+                        if (
+                            final_result_event := params.model_request_parameters.get_final_result_event(event)
+                        ) is not None:
                             yield final_result_event
                             break
 

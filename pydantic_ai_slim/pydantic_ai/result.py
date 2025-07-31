@@ -46,6 +46,7 @@ T = TypeVar('T')
 class AgentStream(Generic[AgentDepsT, OutputDataT]):
     _raw_stream_response: models.StreamedResponse
     _output_schema: OutputSchema[OutputDataT]
+    _model_request_parameters: models.ModelRequestParameters
     _output_validators: list[OutputValidator[AgentDepsT, OutputDataT]]
     _run_ctx: RunContext[AgentDepsT]
     _usage_limits: UsageLimits | None
@@ -230,32 +231,12 @@ class AgentStream(Generic[AgentDepsT, OutputDataT]):
             return self._agent_stream_iterator
 
         async def aiter():
-            output_schema = self._output_schema
-
-            def _get_final_result_event(e: _messages.ModelResponseStreamEvent) -> _messages.FinalResultEvent | None:
-                """Return an appropriate FinalResultEvent if `e` corresponds to a part that will produce a final result."""
-                if isinstance(e, _messages.PartStartEvent):
-                    new_part = e.part
-                    if isinstance(new_part, _messages.TextPart) and isinstance(
-                        output_schema, TextOutputSchema
-                    ):  # pragma: no branch
-                        return _messages.FinalResultEvent(tool_name=None, tool_call_id=None)
-                    elif isinstance(new_part, _messages.ToolCallPart) and (
-                        tool_def := self._tool_manager.get_tool_def(new_part.tool_name)
-                    ):
-                        if tool_def.kind == 'output':
-                            return _messages.FinalResultEvent(
-                                tool_name=new_part.tool_name, tool_call_id=new_part.tool_call_id
-                            )
-                        elif tool_def.kind == 'deferred':
-                            return _messages.FinalResultEvent(tool_name=None, tool_call_id=None)
-
             usage_checking_stream = _get_usage_checking_stream_response(
                 self._raw_stream_response, self._usage_limits, self.usage
             )
             async for event in usage_checking_stream:
                 yield event
-                if (final_result_event := _get_final_result_event(event)) is not None:
+                if (final_result_event := self._model_request_parameters.get_final_result_event(event)) is not None:
                     self._final_result_event = final_result_event
                     yield final_result_event
                     break
