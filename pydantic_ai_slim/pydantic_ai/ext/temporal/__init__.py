@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import warnings
 from collections.abc import Sequence
 from dataclasses import replace
 from typing import Any, Callable
 
 from temporalio.client import ClientConfig, Plugin as ClientPlugin
-from temporalio.contrib.pydantic import pydantic_data_converter
+from temporalio.contrib.pydantic import PydanticPayloadConverter, pydantic_data_converter
+from temporalio.converter import DefaultPayloadConverter
 from temporalio.worker import Plugin as WorkerPlugin, WorkerConfig
 from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner
 
@@ -29,6 +31,14 @@ class PydanticAIPlugin(ClientPlugin, WorkerPlugin):
     """Temporal client and worker plugin for Pydantic AI."""
 
     def configure_client(self, config: ClientConfig) -> ClientConfig:
+        if (data_converter := config.get('data_converter')) and data_converter.payload_converter_class not in (
+            DefaultPayloadConverter,
+            PydanticPayloadConverter,
+        ):
+            warnings.warn(
+                'A non-default Temporal data converter was used which has been replaced with the Pydantic data converter.'
+            )
+
         config['data_converter'] = pydantic_data_converter
         return super().configure_client(config)
 
