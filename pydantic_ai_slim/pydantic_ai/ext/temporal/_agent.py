@@ -1,16 +1,15 @@
 from __future__ import annotations
 
-from collections.abc import Generator
-from contextlib import contextmanager
-from typing import Any, Callable
+from typing import Any, Callable, cast
 
 from pydantic_ai.agent import Agent
 from pydantic_ai.models import Model
 from pydantic_ai.toolsets.abstract import AbstractToolset
+from pydantic_ai.toolsets.function import FunctionToolset
 
-from ._model import temporalize_model, untemporalize_model
+from ._model import TemporalModel
 from ._settings import TemporalSettings
-from ._toolset import temporalize_toolset, untemporalize_toolset
+from ._toolset import temporalize_toolset
 
 
 def temporalize_agent(
@@ -19,7 +18,7 @@ def temporalize_agent(
     toolset_settings: dict[str, TemporalSettings] = {},
     tool_settings: dict[str, dict[str, TemporalSettings]] = {},
     temporalize_toolset_func: Callable[
-        [AbstractToolset, TemporalSettings | None, dict[str, TemporalSettings]], list[Callable[..., Any]]
+        [AbstractToolset, TemporalSettings | None, dict[str, TemporalSettings]], AbstractToolset
     ] = temporalize_toolset,
 ) -> list[Callable[..., Any]]:
     """Temporalize an agent.
@@ -38,19 +37,27 @@ def temporalize_agent(
 
     activities: list[Callable[..., Any]] = []
     if isinstance(agent.model, Model):
-        activities.extend(temporalize_model(agent.model, settings, agent._event_stream_handler))  # pyright: ignore[reportPrivateUsage]
+        model = TemporalModel(agent.model, settings, agent._event_stream_handler)  # pyright: ignore[reportPrivateUsage]
+        activities.extend(model.activities)
+        agent.model = model
+    else:
+        raise ValueError(
+            'Model cannot be set at agent run time when using Temporal, it must be set at agent creation time.'
+        )
 
-    def temporalize_toolset(toolset: AbstractToolset) -> None:
+    def temporalize_toolset(toolset: AbstractToolset) -> AbstractToolset:
         id = toolset.id
         if not id:
             raise ValueError(
                 "A toolset needs to have an ID in order to be used with Temporal. The ID will be used to identify the toolset's activities within the workflow."
             )
-        activities.extend(
-            temporalize_toolset_func(toolset, settings.merge(toolset_settings.get(id)), tool_settings.get(id, {}))
-        )
+        toolset = temporalize_toolset_func(toolset, settings.merge(toolset_settings.get(id)), tool_settings.get(id, {}))
+        if hasattr(toolset, 'activities'):
+            activities.extend(getattr(toolset, 'activities'))
+        return toolset
 
-    agent.toolset.apply(temporalize_toolset)
+    agent._function_toolset = cast(FunctionToolset, temporalize_toolset(agent._function_toolset))  # pyright: ignore[reportPrivateUsage]
+    agent._user_toolsets = [temporalize_toolset(toolset) for toolset in agent._user_toolsets]  # pyright: ignore[reportPrivateUsage]
 
     original_iter = agent.iter
     original_override = agent.override
@@ -87,34 +94,3 @@ def temporalize_agent(
 
     setattr(agent, '__temporal_activities', activities)
     return activities
-
-
-def untemporalize_agent(agent: Agent[Any, Any]) -> None:
-    """Untemporalize an agent.
-
-    Args:
-        agent: The agent to untemporalize.
-    """
-    if not hasattr(agent, '__temporal_activities'):
-        return
-
-    if isinstance(agent.model, Model):
-        untemporalize_model(agent.model)
-
-    agent.toolset.apply(untemporalize_toolset)
-
-    agent.iter = getattr(agent, '__original_iter')
-    agent.override = getattr(agent, '__original_override')
-    delattr(agent, '__original_iter')
-    delattr(agent, '__original_override')
-
-    delattr(agent, '__temporal_activities')
-
-
-@contextmanager
-def temporalized_agent(agent: Agent[Any, Any], settings: TemporalSettings | None = None) -> Generator[None, None, None]:
-    temporalize_agent(agent, settings)
-    try:
-        yield
-    finally:
-        untemporalize_agent(agent)

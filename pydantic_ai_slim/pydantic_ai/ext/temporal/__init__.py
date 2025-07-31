@@ -11,7 +11,7 @@ from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner
 
 from pydantic_ai.agent import Agent
 
-from ._agent import temporalize_agent, untemporalize_agent
+from ._agent import temporalize_agent
 from ._logfire import LogfirePlugin
 from ._run_context import TemporalRunContext
 from ._settings import TemporalSettings
@@ -23,7 +23,6 @@ __all__ = [
     'LogfirePlugin',
     'AgentPlugin',
     'temporalize_agent',
-    'untemporalize_agent',
 ]
 
 
@@ -61,9 +60,7 @@ class AgentPlugin(WorkerPlugin):
     def configure_worker(self, config: WorkerConfig) -> WorkerConfig:
         agent_activities = getattr(self.agent, '__temporal_activities', None)
         if agent_activities is None:
-            raise ValueError(
-                'The agent has not been temporalized yet, call `temporalize_agent(agent)` (or `with temporalized_agent(agent): ...`) first.'
-            )
+            raise ValueError('The agent has not been temporalized yet, call `temporalize_agent(agent)` first.')
 
         activities: Sequence[Callable[..., Any]] = config.get('activities', [])  # pyright: ignore[reportUnknownMemberType]
         config['activities'] = [*activities, *agent_activities]
