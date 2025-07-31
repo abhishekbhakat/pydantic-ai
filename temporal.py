@@ -7,6 +7,7 @@ import logfire
 from temporalio import workflow
 from temporalio.client import Client
 from temporalio.worker import Worker
+from temporalio.workflow import ActivityConfig
 from typing_extensions import TypedDict
 
 from pydantic_ai import Agent, RunContext
@@ -14,7 +15,7 @@ from pydantic_ai.ext.temporal import (
     AgentPlugin,
     LogfirePlugin,
     PydanticAIPlugin,
-    TemporalSettings,
+    TemporalRunContextWithDeps,
     temporalize_agent,
 )
 from pydantic_ai.mcp import MCPServerStdio
@@ -56,16 +57,17 @@ agent = Agent(
 # as it modifies the `agent` object in place to swap out methods that use IO for ones that use Temporal activities.
 temporalize_agent(
     agent,
-    settings=TemporalSettings(start_to_close_timeout=timedelta(seconds=60)),
-    toolset_settings={
-        'country': TemporalSettings(start_to_close_timeout=timedelta(seconds=120)),
+    activity_config=ActivityConfig(start_to_close_timeout=timedelta(seconds=60)),
+    toolset_activity_config={
+        'country': ActivityConfig(start_to_close_timeout=timedelta(seconds=120)),
     },
-    tool_settings={
+    tool_activity_config={
         'toolset': {
             'get_country': False,
-            'get_weather': TemporalSettings(start_to_close_timeout=timedelta(seconds=180)),
+            'get_weather': ActivityConfig(start_to_close_timeout=timedelta(seconds=180)),
         },
     },
+    run_context_type=TemporalRunContextWithDeps,
 )
 
 with workflow.unsafe.imports_passed_through():

@@ -2,42 +2,45 @@ from __future__ import annotations
 
 from typing import Any, Callable, Literal, cast
 
+from temporalio.workflow import ActivityConfig
+
 from pydantic_ai.agent import Agent
+from pydantic_ai.ext.temporal._run_context import TemporalRunContext
 from pydantic_ai.models import Model
 from pydantic_ai.toolsets.abstract import AbstractToolset
 from pydantic_ai.toolsets.function import FunctionToolset
 
 from ._model import TemporalModel
-from ._settings import TemporalSettings
 from ._toolset import temporalize_toolset
 
 
 def temporalize_agent(
     agent: Agent[Any, Any],
-    settings: TemporalSettings | None = None,
-    toolset_settings: dict[str, TemporalSettings] = {},
-    tool_settings: dict[str, dict[str, TemporalSettings | Literal[False]]] = {},
+    activity_config: ActivityConfig = {},
+    toolset_activity_config: dict[str, ActivityConfig] = {},
+    tool_activity_config: dict[str, dict[str, ActivityConfig | Literal[False]]] = {},
+    run_context_type: type[TemporalRunContext] = TemporalRunContext,
     temporalize_toolset_func: Callable[
-        [AbstractToolset, TemporalSettings | None, dict[str, TemporalSettings | Literal[False]]], AbstractToolset
+        [AbstractToolset, ActivityConfig, dict[str, ActivityConfig | Literal[False]], type[TemporalRunContext]],
+        AbstractToolset,
     ] = temporalize_toolset,
 ) -> list[Callable[..., Any]]:
     """Temporalize an agent.
 
     Args:
         agent: The agent to temporalize.
-        settings: The temporal settings to use.
-        toolset_settings: The temporal settings to use for specific toolsets identified by ID.
-        tool_settings: The temporal settings to use for specific tools identified by toolset ID and tool name.
+        activity_config: The Temporal activity config to use.
+        toolset_activity_config: The Temporal activity config to use for specific toolsets identified by ID.
+        tool_activity_config: The Temporal activity config to use for specific tools identified by toolset ID and tool name.
+        run_context_type: The type of run context to use to serialize and deserialize the run context.
         temporalize_toolset_func: The function to use to temporalize the toolsets.
     """
     if existing_activities := getattr(agent, '__temporal_activities', None):
         return existing_activities
 
-    settings = settings or TemporalSettings()
-
     activities: list[Callable[..., Any]] = []
     if isinstance(agent.model, Model):
-        model = TemporalModel(agent.model, settings, agent._event_stream_handler)  # pyright: ignore[reportPrivateUsage]
+        model = TemporalModel(agent.model, activity_config, agent._event_stream_handler, run_context_type)  # pyright: ignore[reportPrivateUsage]
         activities.extend(model.activities)
         agent.model = model
     else:
@@ -51,7 +54,12 @@ def temporalize_agent(
             raise ValueError(
                 "A toolset needs to have an ID in order to be used with Temporal. The ID will be used to identify the toolset's activities within the workflow."
             )
-        toolset = temporalize_toolset_func(toolset, settings.merge(toolset_settings.get(id)), tool_settings.get(id, {}))
+        toolset = temporalize_toolset_func(
+            toolset,
+            activity_config | toolset_activity_config.get(id, {}),
+            tool_activity_config.get(id, {}),
+            run_context_type,
+        )
         if hasattr(toolset, 'activities'):
             activities.extend(getattr(toolset, 'activities'))
         return toolset

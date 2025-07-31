@@ -8,6 +8,7 @@ from typing import Any, Callable
 
 from pydantic import ConfigDict, with_config
 from temporalio import activity, workflow
+from temporalio.workflow import ActivityConfig
 
 from pydantic_ai._run_context import RunContext
 from pydantic_ai.agent import EventStreamHandler
@@ -27,7 +28,6 @@ from pydantic_ai.settings import ModelSettings
 from pydantic_ai.usage import Usage
 
 from ._run_context import TemporalRunContext
-from ._settings import TemporalSettings
 
 
 @dataclass
@@ -71,12 +71,14 @@ class TemporalModel(WrapperModel):
     def __init__(
         self,
         model: Model,
-        settings: TemporalSettings | None = None,
+        activity_config: ActivityConfig = {},
         event_stream_handler: EventStreamHandler | None = None,
+        run_context_type: type[TemporalRunContext] = TemporalRunContext,
     ):
         super().__init__(model)
-        self.temporal_settings = settings or TemporalSettings()
+        self.activity_config = activity_config
         self.event_stream_handler = event_stream_handler
+        self.run_context_type = run_context_type
 
         id = '_'.join([model.system, model.model_name])
 
@@ -88,9 +90,7 @@ class TemporalModel(WrapperModel):
 
         @activity.defn(name=f'model__{id}__request_stream')
         async def request_stream_activity(params: _RequestParams) -> ModelResponse:
-            run_context = TemporalRunContext.deserialize_run_context(
-                params.serialized_run_context, self.temporal_settings.deserialize_run_context
-            )
+            run_context = self.run_context_type.deserialize_run_context(params.serialized_run_context)
             async with self.wrapped.request_stream(
                 params.messages, params.model_settings, params.model_request_parameters, run_context
             ) as streamed_response:
@@ -161,7 +161,7 @@ class TemporalModel(WrapperModel):
                 model_request_parameters=model_request_parameters,
                 serialized_run_context=None,
             ),
-            **self.temporal_settings.execute_activity_options,
+            **self.activity_config,
         )
 
     @asynccontextmanager
@@ -177,9 +177,7 @@ class TemporalModel(WrapperModel):
         if run_context is None:
             raise UserError('Streaming with Temporal requires `request_stream` to be called with a `run_context`')
 
-        serialized_run_context = TemporalRunContext.serialize_run_context(
-            run_context, self.temporal_settings.serialize_run_context
-        )
+        serialized_run_context = self.run_context_type.serialize_run_context(run_context)
         response = await workflow.execute_activity(  # pyright: ignore[reportUnknownMemberType]
             activity=self.request_stream_activity,
             arg=_RequestParams(
@@ -188,6 +186,6 @@ class TemporalModel(WrapperModel):
                 model_request_parameters=model_request_parameters,
                 serialized_run_context=serialized_run_context,
             ),
-            **self.temporal_settings.execute_activity_options,
+            **self.activity_config,
         )
         yield _TemporalStreamedResponse(response)

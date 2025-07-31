@@ -5,6 +5,7 @@ from typing import Any, Callable, Literal
 
 from pydantic import ConfigDict, with_config
 from temporalio import activity, workflow
+from temporalio.workflow import ActivityConfig
 
 from pydantic_ai._run_context import RunContext
 from pydantic_ai.exceptions import UserError
@@ -14,7 +15,6 @@ from pydantic_ai.toolsets.abstract import ToolsetTool
 from pydantic_ai.toolsets.wrapper import WrapperToolset
 
 from ._run_context import TemporalRunContext
-from ._settings import TemporalSettings
 
 
 @dataclass
@@ -36,30 +36,28 @@ class TemporalMCPServer(WrapperToolset[Any]):
     def __init__(
         self,
         server: MCPServer,
-        settings: TemporalSettings | None = None,
-        tool_settings: dict[str, TemporalSettings | Literal[False]] = {},
+        activity_config: ActivityConfig = {},
+        tool_activity_config: dict[str, ActivityConfig | Literal[False]] = {},
+        run_context_type: type[TemporalRunContext] = TemporalRunContext,
     ):
         super().__init__(server)
-        self.settings = settings or TemporalSettings()
-        self.tool_settings = tool_settings
+        self.activity_config = activity_config
+        self.tool_activity_config = tool_activity_config
+        self.run_context_type = run_context_type
 
         id = server.id
         assert id is not None
 
         @activity.defn(name=f'mcp_server__{id}__get_tools')
         async def get_tools_activity(params: _GetToolsParams) -> dict[str, ToolDefinition]:
-            run_context = TemporalRunContext.deserialize_run_context(
-                params.serialized_run_context, self.settings.deserialize_run_context
-            )
+            run_context = self.run_context_type.deserialize_run_context(params.serialized_run_context)
             return {name: tool.tool_def for name, tool in (await self.wrapped.get_tools(run_context)).items()}
 
         self.get_tools_activity = get_tools_activity
 
         @activity.defn(name=f'mcp_server__{id}__call_tool')
         async def call_tool_activity(params: _CallToolParams) -> ToolResult:
-            run_context = TemporalRunContext.deserialize_run_context(
-                params.serialized_run_context, self.settings.deserialize_run_context
-            )
+            run_context = self.run_context_type.deserialize_run_context(params.serialized_run_context)
             return await self.wrapped.call_tool(
                 params.name,
                 params.tool_args,
@@ -79,11 +77,11 @@ class TemporalMCPServer(WrapperToolset[Any]):
         return [self.get_tools_activity, self.call_tool_activity]
 
     async def get_tools(self, ctx: RunContext[Any]) -> dict[str, ToolsetTool[Any]]:
-        serialized_run_context = TemporalRunContext.serialize_run_context(ctx, self.settings.serialize_run_context)
+        serialized_run_context = self.run_context_type.serialize_run_context(ctx)
         tool_defs = await workflow.execute_activity(  # pyright: ignore[reportUnknownMemberType]
             activity=self.get_tools_activity,
             arg=_GetToolsParams(serialized_run_context=serialized_run_context),
-            **self.settings.execute_activity_options,
+            **self.activity_config,
         )
         return {
             name: self.wrapped_server._toolset_tool_for_tool_def(tool_def)  # pyright: ignore[reportPrivateUsage]
@@ -97,12 +95,12 @@ class TemporalMCPServer(WrapperToolset[Any]):
         ctx: RunContext[Any],
         tool: ToolsetTool[Any],
     ) -> ToolResult:
-        settings_for_tool = self.tool_settings.get(name)
-        if settings_for_tool is False:
+        tool_activity_config = self.tool_activity_config.get(name, {})
+        if tool_activity_config is False:
             raise UserError('Disabling running an MCP tool in a Temporal activity is not possible.')
 
-        settings_for_tool = self.settings.merge(settings_for_tool)
-        serialized_run_context = TemporalRunContext.serialize_run_context(ctx, settings_for_tool.serialize_run_context)
+        tool_activity_config = self.activity_config | tool_activity_config
+        serialized_run_context = self.run_context_type.serialize_run_context(ctx)
         return await workflow.execute_activity(  # pyright: ignore[reportUnknownMemberType]
             activity=self.call_tool_activity,
             arg=_CallToolParams(
@@ -111,5 +109,5 @@ class TemporalMCPServer(WrapperToolset[Any]):
                 serialized_run_context=serialized_run_context,
                 tool_def=tool.tool_def,
             ),
-            **settings_for_tool.execute_activity_options,
+            **tool_activity_config,
         )
