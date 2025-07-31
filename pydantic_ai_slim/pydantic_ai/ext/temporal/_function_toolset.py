@@ -65,15 +65,6 @@ class TemporalFunctionToolset(TemporalWrapperToolset):
     def temporal_activities(self) -> list[Callable[..., Any]]:
         return [self.call_tool_activity]
 
-    def tool(self, *args: Any, **kwargs: Any) -> Any:
-        return self.wrapped_function_toolset.tool(*args, **kwargs)
-
-    def add_function(self, *args: Any, **kwargs: Any) -> None:
-        return self.wrapped_function_toolset.add_function(*args, **kwargs)
-
-    def add_tool(self, *args: Any, **kwargs: Any) -> None:
-        return self.wrapped_function_toolset.add_tool(*args, **kwargs)
-
     async def call_tool(self, name: str, tool_args: dict[str, Any], ctx: RunContext, tool: ToolsetTool) -> Any:
         if not workflow.in_workflow():
             return await super().call_tool(name, tool_args, ctx, tool)

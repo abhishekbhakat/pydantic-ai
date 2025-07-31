@@ -20,11 +20,11 @@ class TemporalWrapperToolset(WrapperToolset[Any], ABC):
 
 
 def temporalize_toolset(
-    toolset: AbstractToolset,
+    toolset: AbstractToolset[Any],
     activity_config: ActivityConfig = {},
     tool_activity_config: dict[str, ActivityConfig | Literal[False]] = {},
     run_context_type: type[TemporalRunContext] = TemporalRunContext,
-) -> AbstractToolset:
+) -> AbstractToolset[Any]:
     """Temporalize a toolset.
 
     Args:

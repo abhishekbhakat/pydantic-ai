@@ -51,7 +51,10 @@ class TemporalMCPServer(TemporalWrapperToolset):
         @activity.defn(name=f'mcp_server__{id}__get_tools')
         async def get_tools_activity(params: _GetToolsParams) -> dict[str, ToolDefinition]:
             run_context = self.run_context_type.deserialize_run_context(params.serialized_run_context)
-            return {name: tool.tool_def for name, tool in (await self.wrapped.get_tools(run_context)).items()}
+            tools = await self.wrapped.get_tools(run_context)
+            # ToolsetTool is not serializable as its holds a SchemaValidator (which is also the same for every MCP tool so unnecessary to pass along the wire every time),
+            # so we just return the ToolDefinitions and wrap them in ToolsetTool outside of the activity.
+            return {name: tool.tool_def for name, tool in tools.items()}
 
         self.get_tools_activity = get_tools_activity
 
@@ -62,7 +65,7 @@ class TemporalMCPServer(TemporalWrapperToolset):
                 params.name,
                 params.tool_args,
                 run_context,
-                self.wrapped_server._toolset_tool_for_tool_def(params.tool_def),  # pyright: ignore[reportPrivateUsage]
+                self.wrapped_server.tool_for_tool_def(params.tool_def),
             )
 
         self.call_tool_activity = call_tool_activity
@@ -86,10 +89,7 @@ class TemporalMCPServer(TemporalWrapperToolset):
             arg=_GetToolsParams(serialized_run_context=serialized_run_context),
             **self.activity_config,
         )
-        return {
-            name: self.wrapped_server._toolset_tool_for_tool_def(tool_def)  # pyright: ignore[reportPrivateUsage]
-            for name, tool_def in tool_defs.items()
-        }
+        return {name: self.wrapped_server.tool_for_tool_def(tool_def) for name, tool_def in tool_defs.items()}
 
     async def call_tool(
         self,

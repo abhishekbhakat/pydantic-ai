@@ -65,6 +65,7 @@ def temporalize_agent(  # noqa: C901
             activities.extend(toolset.temporal_activities)
         return toolset
 
+    # TODO: Use public methods so others can replicate this
     temporal_toolsets = [temporalize_toolset(toolset) for toolset in [agent._function_toolset, *agent._user_toolsets]]  # pyright: ignore[reportPrivateUsage]
 
     original_iter = agent.iter

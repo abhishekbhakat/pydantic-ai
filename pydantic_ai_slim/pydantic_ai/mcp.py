@@ -207,7 +207,7 @@ class MCPServer(AbstractToolset[Any], ABC):
 
     async def get_tools(self, ctx: RunContext[Any]) -> dict[str, ToolsetTool[Any]]:
         return {
-            name: self._toolset_tool_for_tool_def(
+            name: self.tool_for_tool_def(
                 ToolDefinition(
                     name=name,
                     description=mcp_tool.description,
@@ -218,7 +218,7 @@ class MCPServer(AbstractToolset[Any], ABC):
             if (name := f'{self.tool_prefix}_{mcp_tool.name}' if self.tool_prefix else mcp_tool.name)
         }
 
-    def _toolset_tool_for_tool_def(self, tool_def: ToolDefinition) -> ToolsetTool[Any]:
+    def tool_for_tool_def(self, tool_def: ToolDefinition) -> ToolsetTool[Any]:
         return ToolsetTool(
             toolset=self,
             tool_def=tool_def,

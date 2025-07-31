@@ -10,7 +10,7 @@ from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontext
 from contextvars import ContextVar
 from copy import deepcopy
 from types import FrameType
-from typing import TYPE_CHECKING, Any, Callable, ClassVar, Generic, cast, final, overload
+from typing import TYPE_CHECKING, Any, Callable, ClassVar, Generic, cast, overload
 
 from opentelemetry.trace import NoOpTracer, use_span
 from pydantic.json_schema import GenerateJsonSchema
@@ -105,7 +105,6 @@ EventStreamHandler: TypeAlias = Callable[
 ]
 
 
-@final
 @dataclasses.dataclass(init=False)
 class Agent(Generic[AgentDepsT, OutputDataT]):
     """Class for defining "agents" - a way to have a specific type of "conversation" with an LLM.
@@ -798,7 +797,7 @@ class Agent(Generic[AgentDepsT, OutputDataT]):
 
         toolset = self._get_toolset(output_toolset=output_toolset, additional_toolsets=toolsets)
         # This will raise errors for any name conflicts
-        run_toolset = await ToolManager[AgentDepsT].build(toolset, run_context)
+        tool_manager = await ToolManager[AgentDepsT].build(toolset, run_context)
 
         # Merge model settings in order of precedence: run > agent > model
         merged_settings = merge_model_settings(model_used.settings, self.model_settings)
@@ -842,7 +841,7 @@ class Agent(Generic[AgentDepsT, OutputDataT]):
             output_schema=output_schema,
             output_validators=output_validators,
             history_processors=self.history_processors,
-            tool_manager=run_toolset,
+            tool_manager=tool_manager,
             tracer=tracer,
             get_instructions=get_instructions,
             instrumentation_settings=instrumentation_settings,
