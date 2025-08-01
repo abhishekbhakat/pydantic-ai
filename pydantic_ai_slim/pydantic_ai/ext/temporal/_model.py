@@ -95,6 +95,7 @@ class TemporalModel(WrapperModel):
                     # `AgentStream.__aiter__`, which this is based on, calls `_get_usage_checking_stream_response` here,
                     # but we don't have access to the `_usage_limits`.
 
+                    # TODO: Create new stream wrapper that does this
                     async for event in streamed_response:
                         yield event
                         if (
