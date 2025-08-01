@@ -22,7 +22,7 @@ class TemporalRunContext(RunContext[Any]):
             if name in RunContext.__dataclass_fields__:
                 raise AttributeError(
                     f'{self.__class__.__name__!r} object has no attribute {name!r}. '
-                    'To make the attribute available, create a `TemporalRunContext` subclass with a custom `serialize_run_context` class method that returns a dictionary that includes the attribute and pass it to `temporalize_agent`.'
+                    'To make the attribute available, create a `TemporalRunContext` subclass with a custom `serialize_run_context` class method that returns a dictionary that includes the attribute and pass it to `TemporalAgent`.'
                 )
             else:
                 raise e
@@ -48,6 +48,6 @@ class TemporalRunContextWithDeps(TemporalRunContext):
         if not isinstance(ctx.deps, dict):
             raise UserError(
                 'The `deps` object must be a JSON-serializable dictionary in order to be used with Temporal. '
-                'To use a different type, pass a `TemporalRunContext` subclass to `temporalize_agent` with custom `serialize_run_context` and `deserialize_run_context` class methods.'
+                'To use a different type, pass a `TemporalRunContext` subclass to `TemporalAgent` with custom `serialize_run_context` and `deserialize_run_context` class methods.'
             )
         return {**super().serialize_run_context(ctx), 'deps': ctx.deps}  # pyright: ignore[reportUnknownMemberType]

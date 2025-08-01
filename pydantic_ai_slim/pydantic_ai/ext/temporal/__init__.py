@@ -11,10 +11,7 @@ from temporalio.converter import DefaultPayloadConverter
 from temporalio.worker import Plugin as WorkerPlugin, WorkerConfig
 from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner
 
-from pydantic_ai.agent import Agent
-from pydantic_ai.exceptions import UserError
-
-from ._agent import temporalize_agent
+from ._agent import TemporalAgent
 from ._logfire import LogfirePlugin
 from ._run_context import TemporalRunContext, TemporalRunContextWithDeps
 
@@ -24,7 +21,7 @@ __all__ = [
     'PydanticAIPlugin',
     'LogfirePlugin',
     'AgentPlugin',
-    'temporalize_agent',
+    'TemporalAgent',
 ]
 
 
@@ -64,14 +61,10 @@ class PydanticAIPlugin(ClientPlugin, WorkerPlugin):
 class AgentPlugin(WorkerPlugin):
     """Temporal worker plugin for a specific Pydantic AI agent."""
 
-    def __init__(self, agent: Agent[Any, Any]):
+    def __init__(self, agent: TemporalAgent[Any, Any]):
         self.agent = agent
 
     def configure_worker(self, config: WorkerConfig) -> WorkerConfig:
-        agent_activities = getattr(self.agent, '__temporal_activities', None)
-        if agent_activities is None:
-            raise UserError('The agent has not been prepared for Temporal yet, call `temporalize_agent(agent)` first.')
-
         activities: Sequence[Callable[..., Any]] = config.get('activities', [])  # pyright: ignore[reportUnknownMemberType]
-        config['activities'] = [*activities, *agent_activities]
+        config['activities'] = [*activities, *self.agent.temporal_activities]
         return super().configure_worker(config)

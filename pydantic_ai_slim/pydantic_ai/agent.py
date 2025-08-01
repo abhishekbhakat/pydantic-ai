@@ -4,6 +4,7 @@ import dataclasses
 import inspect
 import json
 import warnings
+from abc import ABC, abstractmethod
 from asyncio import Lock
 from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Iterator, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontextmanager, contextmanager
@@ -105,8 +106,1119 @@ EventStreamHandler: TypeAlias = Callable[
 ]
 
 
+class AbstractAgent(Generic[AgentDepsT, OutputDataT], ABC):
+    @property
+    @abstractmethod
+    def model(self) -> models.Model | models.KnownModelName | str | None:
+        raise NotImplementedError
+
+    @property
+    @abstractmethod
+    def name(self) -> str | None:
+        raise NotImplementedError
+
+    @name.setter
+    @abstractmethod
+    def name(self, value: str | None) -> None:
+        raise NotImplementedError
+
+    @property
+    @abstractmethod
+    def output_type(self) -> OutputSpec[OutputDataT]:
+        raise NotImplementedError
+
+    @property
+    @abstractmethod
+    def event_stream_handler(self) -> EventStreamHandler[AgentDepsT] | None:
+        raise NotImplementedError
+
+    @overload
+    async def run(
+        self,
+        user_prompt: str | Sequence[_messages.UserContent] | None = None,
+        *,
+        output_type: None = None,
+        message_history: list[_messages.ModelMessage] | None = None,
+        model: models.Model | models.KnownModelName | str | None = None,
+        deps: AgentDepsT = None,
+        model_settings: ModelSettings | None = None,
+        usage_limits: _usage.UsageLimits | None = None,
+        usage: _usage.Usage | None = None,
+        infer_name: bool = True,
+        toolsets: Sequence[AbstractToolset[AgentDepsT]] | None = None,
+    ) -> AgentRunResult[OutputDataT]: ...
+
+    @overload
+    async def run(
+        self,
+        user_prompt: str | Sequence[_messages.UserContent] | None = None,
+        *,
+        output_type: OutputSpec[RunOutputDataT],
+        message_history: list[_messages.ModelMessage] | None = None,
+        model: models.Model | models.KnownModelName | str | None = None,
+        deps: AgentDepsT = None,
+        model_settings: ModelSettings | None = None,
+        usage_limits: _usage.UsageLimits | None = None,
+        usage: _usage.Usage | None = None,
+        infer_name: bool = True,
+        toolsets: Sequence[AbstractToolset[AgentDepsT]] | None = None,
+    ) -> AgentRunResult[RunOutputDataT]: ...
+
+    @overload
+    @deprecated('`result_type` is deprecated, use `output_type` instead.')
+    async def run(
+        self,
+        user_prompt: str | Sequence[_messages.UserContent] | None = None,
+        *,
+        result_type: type[RunOutputDataT],
+        message_history: list[_messages.ModelMessage] | None = None,
+        model: models.Model | models.KnownModelName | str | None = None,
+        deps: AgentDepsT = None,
+        model_settings: ModelSettings | None = None,
+        usage_limits: _usage.UsageLimits | None = None,
+        usage: _usage.Usage | None = None,
+        infer_name: bool = True,
+        toolsets: Sequence[AbstractToolset[AgentDepsT]] | None = None,
+    ) -> AgentRunResult[RunOutputDataT]: ...
+
+    async def run(
+        self,
+        user_prompt: str | Sequence[_messages.UserContent] | None = None,
+        *,
+        output_type: OutputSpec[RunOutputDataT] | None = None,
+        message_history: list[_messages.ModelMessage] | None = None,
+        model: models.Model | models.KnownModelName | str | None = None,
+        deps: AgentDepsT = None,
+        model_settings: ModelSettings | None = None,
+        usage_limits: _usage.UsageLimits | None = None,
+        usage: _usage.Usage | None = None,
+        infer_name: bool = True,
+        toolsets: Sequence[AbstractToolset[AgentDepsT]] | None = None,
+        **_deprecated_kwargs: Never,
+    ) -> AgentRunResult[Any]:
+        """Run the agent with a user prompt in async mode.
+
+        This method builds an internal agent graph (using system prompts, tools and result schemas) and then
+        runs the graph to completion. The result of the run is returned.
+
+        Example:
+        ```python
+        from pydantic_ai import Agent
+
+        agent = Agent('openai:gpt-4o')
+
+        async def main():
+            agent_run = await agent.run('What is the capital of France?')
+            print(agent_run.output)
+            #> Paris
+        ```
+
+        Args:
+            user_prompt: User input to start/continue the conversation.
+            output_type: Custom output type to use for this run, `output_type` may only be used if the agent has no
+                output validators since output validators would expect an argument that matches the agent's output type.
+            message_history: History of the conversation so far.
+            model: Optional model to use for this run, required if `model` was not set when creating the agent.
+            deps: Optional dependencies to use for this run.
+            model_settings: Optional settings to use for this model's request.
+            usage_limits: Optional limits on model request count or token usage.
+            usage: Optional usage to start with, useful for resuming a conversation or agents used in tools.
+            infer_name: Whether to try to infer the agent name from the call frame if it's not set.
+            toolsets: Optional additional toolsets for this run.
+
+        Returns:
+            The result of the run.
+        """
+        if infer_name and self.name is None:
+            self._infer_name(inspect.currentframe())
+
+        if 'result_type' in _deprecated_kwargs:  # pragma: no cover
+            if output_type is not str:
+                raise TypeError('`result_type` and `output_type` cannot be set at the same time.')
+            warnings.warn('`result_type` is deprecated, use `output_type` instead.', DeprecationWarning, stacklevel=2)
+            output_type = _deprecated_kwargs.pop('result_type')
+
+        _utils.validate_empty_kwargs(_deprecated_kwargs)
+
+        async with self.iter(
+            user_prompt=user_prompt,
+            output_type=output_type,
+            message_history=message_history,
+            model=model,
+            deps=deps,
+            model_settings=model_settings,
+            usage_limits=usage_limits,
+            usage=usage,
+            toolsets=toolsets,
+        ) as agent_run:
+            async for node in agent_run:
+                if self.event_stream_handler is not None and (
+                    self.is_model_request_node(node) or self.is_call_tools_node(node)
+                ):
+                    async with node.stream(agent_run.ctx) as stream:
+                        await self.event_stream_handler(_agent_graph.build_run_context(agent_run.ctx), stream)
+
+        assert agent_run.result is not None, 'The graph run did not finish properly'
+        return agent_run.result
+
+    @overload
+    def run_sync(
+        self,
+        user_prompt: str | Sequence[_messages.UserContent] | None = None,
+        *,
+        message_history: list[_messages.ModelMessage] | None = None,
+        model: models.Model | models.KnownModelName | str | None = None,
+        deps: AgentDepsT = None,
+        model_settings: ModelSettings | None = None,
+        usage_limits: _usage.UsageLimits | None = None,
+        usage: _usage.Usage | None = None,
+        infer_name: bool = True,
+        toolsets: Sequence[AbstractToolset[AgentDepsT]] | None = None,
+    ) -> AgentRunResult[OutputDataT]: ...
+
+    @overload
+    def run_sync(
+        self,
+        user_prompt: str | Sequence[_messages.UserContent] | None = None,
+        *,
+        output_type: OutputSpec[RunOutputDataT] | None = None,
+        message_history: list[_messages.ModelMessage] | None = None,
+        model: models.Model | models.KnownModelName | str | None = None,
+        deps: AgentDepsT = None,
+        model_settings: ModelSettings | None = None,
+        usage_limits: _usage.UsageLimits | None = None,
+        usage: _usage.Usage | None = None,
+        infer_name: bool = True,
+        toolsets: Sequence[AbstractToolset[AgentDepsT]] | None = None,
+    ) -> AgentRunResult[RunOutputDataT]: ...
+
+    @overload
+    @deprecated('`result_type` is deprecated, use `output_type` instead.')
+    def run_sync(
+        self,
+        user_prompt: str | Sequence[_messages.UserContent] | None = None,
+        *,
+        result_type: type[RunOutputDataT],
+        message_history: list[_messages.ModelMessage] | None = None,
+        model: models.Model | models.KnownModelName | str | None = None,
+        deps: AgentDepsT = None,
+        model_settings: ModelSettings | None = None,
+        usage_limits: _usage.UsageLimits | None = None,
+        usage: _usage.Usage | None = None,
+        infer_name: bool = True,
+        toolsets: Sequence[AbstractToolset[AgentDepsT]] | None = None,
+    ) -> AgentRunResult[RunOutputDataT]: ...
+
+    def run_sync(
+        self,
+        user_prompt: str | Sequence[_messages.UserContent] | None = None,
+        *,
+        output_type: OutputSpec[RunOutputDataT] | None = None,
+        message_history: list[_messages.ModelMessage] | None = None,
+        model: models.Model | models.KnownModelName | str | None = None,
+        deps: AgentDepsT = None,
+        model_settings: ModelSettings | None = None,
+        usage_limits: _usage.UsageLimits | None = None,
+        usage: _usage.Usage | None = None,
+        infer_name: bool = True,
+        toolsets: Sequence[AbstractToolset[AgentDepsT]] | None = None,
+        **_deprecated_kwargs: Never,
+    ) -> AgentRunResult[Any]:
+        """Synchronously run the agent with a user prompt.
+
+        This is a convenience method that wraps [`self.run`][pydantic_ai.Agent.run] with `loop.run_until_complete(...)`.
+        You therefore can't use this method inside async code or if there's an active event loop.
+
+        Example:
+        ```python
+        from pydantic_ai import Agent
+
+        agent = Agent('openai:gpt-4o')
+
+        result_sync = agent.run_sync('What is the capital of Italy?')
+        print(result_sync.output)
+        #> Rome
+        ```
+
+        Args:
+            user_prompt: User input to start/continue the conversation.
+            output_type: Custom output type to use for this run, `output_type` may only be used if the agent has no
+                output validators since output validators would expect an argument that matches the agent's output type.
+            message_history: History of the conversation so far.
+            model: Optional model to use for this run, required if `model` was not set when creating the agent.
+            deps: Optional dependencies to use for this run.
+            model_settings: Optional settings to use for this model's request.
+            usage_limits: Optional limits on model request count or token usage.
+            usage: Optional usage to start with, useful for resuming a conversation or agents used in tools.
+            infer_name: Whether to try to infer the agent name from the call frame if it's not set.
+            toolsets: Optional additional toolsets for this run.
+
+        Returns:
+            The result of the run.
+        """
+        if infer_name and self.name is None:
+            self._infer_name(inspect.currentframe())
+
+        if 'result_type' in _deprecated_kwargs:  # pragma: no cover
+            if output_type is not str:
+                raise TypeError('`result_type` and `output_type` cannot be set at the same time.')
+            warnings.warn('`result_type` is deprecated, use `output_type` instead.', DeprecationWarning, stacklevel=2)
+            output_type = _deprecated_kwargs.pop('result_type')
+
+        _utils.validate_empty_kwargs(_deprecated_kwargs)
+
+        return get_event_loop().run_until_complete(
+            self.run(
+                user_prompt,
+                output_type=output_type,
+                message_history=message_history,
+                model=model,
+                deps=deps,
+                model_settings=model_settings,
+                usage_limits=usage_limits,
+                usage=usage,
+                infer_name=False,
+                toolsets=toolsets,
+            )
+        )
+
+    @overload
+    def run_stream(
+        self,
+        user_prompt: str | Sequence[_messages.UserContent] | None = None,
+        *,
+        message_history: list[_messages.ModelMessage] | None = None,
+        model: models.Model | models.KnownModelName | None = None,
+        deps: AgentDepsT = None,
+        model_settings: ModelSettings | None = None,
+        usage_limits: _usage.UsageLimits | None = None,
+        usage: _usage.Usage | None = None,
+        infer_name: bool = True,
+        toolsets: Sequence[AbstractToolset[AgentDepsT]] | None = None,
+    ) -> AbstractAsyncContextManager[result.StreamedRunResult[AgentDepsT, OutputDataT]]: ...
+
+    @overload
+    def run_stream(
+        self,
+        user_prompt: str | Sequence[_messages.UserContent],
+        *,
+        output_type: OutputSpec[RunOutputDataT],
+        message_history: list[_messages.ModelMessage] | None = None,
+        model: models.Model | models.KnownModelName | str | None = None,
+        deps: AgentDepsT = None,
+        model_settings: ModelSettings | None = None,
+        usage_limits: _usage.UsageLimits | None = None,
+        usage: _usage.Usage | None = None,
+        infer_name: bool = True,
+        toolsets: Sequence[AbstractToolset[AgentDepsT]] | None = None,
+    ) -> AbstractAsyncContextManager[result.StreamedRunResult[AgentDepsT, RunOutputDataT]]: ...
+
+    @overload
+    @deprecated('`result_type` is deprecated, use `output_type` instead.')
+    def run_stream(
+        self,
+        user_prompt: str | Sequence[_messages.UserContent] | None = None,
+        *,
+        result_type: type[RunOutputDataT],
+        message_history: list[_messages.ModelMessage] | None = None,
+        model: models.Model | models.KnownModelName | str | None = None,
+        deps: AgentDepsT = None,
+        model_settings: ModelSettings | None = None,
+        usage_limits: _usage.UsageLimits | None = None,
+        usage: _usage.Usage | None = None,
+        infer_name: bool = True,
+        toolsets: Sequence[AbstractToolset[AgentDepsT]] | None = None,
+    ) -> AbstractAsyncContextManager[result.StreamedRunResult[AgentDepsT, RunOutputDataT]]: ...
+
+    @asynccontextmanager
+    async def run_stream(  # noqa C901
+        self,
+        user_prompt: str | Sequence[_messages.UserContent] | None = None,
+        *,
+        output_type: OutputSpec[RunOutputDataT] | None = None,
+        message_history: list[_messages.ModelMessage] | None = None,
+        model: models.Model | models.KnownModelName | str | None = None,
+        deps: AgentDepsT = None,
+        model_settings: ModelSettings | None = None,
+        usage_limits: _usage.UsageLimits | None = None,
+        usage: _usage.Usage | None = None,
+        infer_name: bool = True,
+        toolsets: Sequence[AbstractToolset[AgentDepsT]] | None = None,
+        **_deprecated_kwargs: Never,
+    ) -> AsyncIterator[result.StreamedRunResult[AgentDepsT, Any]]:
+        """Run the agent with a user prompt in async mode, returning a streamed response.
+
+        Example:
+        ```python
+        from pydantic_ai import Agent
+
+        agent = Agent('openai:gpt-4o')
+
+        async def main():
+            async with agent.run_stream('What is the capital of the UK?') as response:
+                print(await response.get_output())
+                #> London
+        ```
+
+        Args:
+            user_prompt: User input to start/continue the conversation.
+            output_type: Custom output type to use for this run, `output_type` may only be used if the agent has no
+                output validators since output validators would expect an argument that matches the agent's output type.
+            message_history: History of the conversation so far.
+            model: Optional model to use for this run, required if `model` was not set when creating the agent.
+            deps: Optional dependencies to use for this run.
+            model_settings: Optional settings to use for this model's request.
+            usage_limits: Optional limits on model request count or token usage.
+            usage: Optional usage to start with, useful for resuming a conversation or agents used in tools.
+            infer_name: Whether to try to infer the agent name from the call frame if it's not set.
+            toolsets: Optional additional toolsets for this run.
+
+        Returns:
+            The result of the run.
+        """
+        # TODO: We need to deprecate this now that we have the `iter` method.
+        #   Before that, though, we should add an event for when we reach the final result of the stream.
+        if infer_name and self.name is None:
+            # f_back because `asynccontextmanager` adds one frame
+            if frame := inspect.currentframe():  # pragma: no branch
+                self._infer_name(frame.f_back)
+
+        if 'result_type' in _deprecated_kwargs:  # pragma: no cover
+            if output_type is not str:
+                raise TypeError('`result_type` and `output_type` cannot be set at the same time.')
+            warnings.warn('`result_type` is deprecated, use `output_type` instead.', DeprecationWarning, stacklevel=2)
+            output_type = _deprecated_kwargs.pop('result_type')
+
+        _utils.validate_empty_kwargs(_deprecated_kwargs)
+
+        yielded = False
+        async with self.iter(
+            user_prompt,
+            output_type=output_type,
+            message_history=message_history,
+            model=model,
+            deps=deps,
+            model_settings=model_settings,
+            usage_limits=usage_limits,
+            usage=usage,
+            infer_name=False,
+            toolsets=toolsets,
+        ) as agent_run:
+            first_node = agent_run.next_node  # start with the first node
+            assert isinstance(first_node, _agent_graph.UserPromptNode)  # the first node should be a user prompt node
+            node = first_node
+            while True:
+                if self.is_model_request_node(node):
+                    graph_ctx = agent_run.ctx
+                    async with node.stream(graph_ctx) as stream:
+
+                        async def stream_to_final(s: AgentStream) -> FinalResult[AgentStream] | None:
+                            async for event in stream:
+                                if isinstance(event, _messages.FinalResultEvent):
+                                    return FinalResult(s, event.tool_name, event.tool_call_id)
+                            return None
+
+                        final_result = await stream_to_final(stream)
+                        if final_result is not None:
+                            if yielded:
+                                raise exceptions.AgentRunError('Agent run produced final results')  # pragma: no cover
+                            yielded = True
+
+                            messages = graph_ctx.state.message_history.copy()
+
+                            async def on_complete() -> None:
+                                """Called when the stream has completed.
+
+                                The model response will have been added to messages by now
+                                by `StreamedRunResult._marked_completed`.
+                                """
+                                last_message = messages[-1]
+                                assert isinstance(last_message, _messages.ModelResponse)
+                                tool_calls = [
+                                    part for part in last_message.parts if isinstance(part, _messages.ToolCallPart)
+                                ]
+
+                                parts: list[_messages.ModelRequestPart] = []
+                                async for _event in _agent_graph.process_function_tools(
+                                    graph_ctx.deps.tool_manager,
+                                    tool_calls,
+                                    final_result,
+                                    graph_ctx,
+                                    parts,
+                                ):
+                                    pass
+                                if parts:
+                                    messages.append(_messages.ModelRequest(parts))
+
+                            yield StreamedRunResult(
+                                messages,
+                                graph_ctx.deps.new_message_index,
+                                stream,
+                                on_complete,
+                            )
+                            break
+                next_node = await agent_run.next(node)
+                if not isinstance(next_node, _agent_graph.AgentNode):
+                    raise exceptions.AgentRunError(  # pragma: no cover
+                        'Should have produced a StreamedRunResult before getting here'
+                    )
+                node = cast(_agent_graph.AgentNode[Any, Any], next_node)
+
+        if not yielded:
+            raise exceptions.AgentRunError('Agent run finished without producing a final result')  # pragma: no cover
+
+    @overload
+    def iter(
+        self,
+        user_prompt: str | Sequence[_messages.UserContent] | None = None,
+        *,
+        output_type: None = None,
+        message_history: list[_messages.ModelMessage] | None = None,
+        model: models.Model | models.KnownModelName | str | None = None,
+        deps: AgentDepsT = None,
+        model_settings: ModelSettings | None = None,
+        usage_limits: _usage.UsageLimits | None = None,
+        usage: _usage.Usage | None = None,
+        infer_name: bool = True,
+        toolsets: Sequence[AbstractToolset[AgentDepsT]] | None = None,
+        **_deprecated_kwargs: Never,
+    ) -> AbstractAsyncContextManager[AgentRun[AgentDepsT, OutputDataT]]: ...
+
+    @overload
+    def iter(
+        self,
+        user_prompt: str | Sequence[_messages.UserContent] | None = None,
+        *,
+        output_type: OutputSpec[RunOutputDataT],
+        message_history: list[_messages.ModelMessage] | None = None,
+        model: models.Model | models.KnownModelName | str | None = None,
+        deps: AgentDepsT = None,
+        model_settings: ModelSettings | None = None,
+        usage_limits: _usage.UsageLimits | None = None,
+        usage: _usage.Usage | None = None,
+        infer_name: bool = True,
+        toolsets: Sequence[AbstractToolset[AgentDepsT]] | None = None,
+        **_deprecated_kwargs: Never,
+    ) -> AbstractAsyncContextManager[AgentRun[AgentDepsT, RunOutputDataT]]: ...
+
+    @overload
+    @deprecated('`result_type` is deprecated, use `output_type` instead.')
+    def iter(
+        self,
+        user_prompt: str | Sequence[_messages.UserContent] | None = None,
+        *,
+        result_type: type[RunOutputDataT],
+        message_history: list[_messages.ModelMessage] | None = None,
+        model: models.Model | models.KnownModelName | str | None = None,
+        deps: AgentDepsT = None,
+        model_settings: ModelSettings | None = None,
+        usage_limits: _usage.UsageLimits | None = None,
+        usage: _usage.Usage | None = None,
+        infer_name: bool = True,
+        toolsets: Sequence[AbstractToolset[AgentDepsT]] | None = None,
+    ) -> AbstractAsyncContextManager[AgentRun[AgentDepsT, Any]]: ...
+
+    @asynccontextmanager
+    @abstractmethod
+    async def iter(
+        self,
+        user_prompt: str | Sequence[_messages.UserContent] | None = None,
+        *,
+        output_type: OutputSpec[RunOutputDataT] | None = None,
+        message_history: list[_messages.ModelMessage] | None = None,
+        model: models.Model | models.KnownModelName | str | None = None,
+        deps: AgentDepsT = None,
+        model_settings: ModelSettings | None = None,
+        usage_limits: _usage.UsageLimits | None = None,
+        usage: _usage.Usage | None = None,
+        infer_name: bool = True,
+        toolsets: Sequence[AbstractToolset[AgentDepsT]] | None = None,
+        **_deprecated_kwargs: Never,
+    ) -> AsyncIterator[AgentRun[AgentDepsT, Any]]:
+        """A contextmanager which can be used to iterate over the agent graph's nodes as they are executed.
+
+        This method builds an internal agent graph (using system prompts, tools and output schemas) and then returns an
+        `AgentRun` object. The `AgentRun` can be used to async-iterate over the nodes of the graph as they are
+        executed. This is the API to use if you want to consume the outputs coming from each LLM model response, or the
+        stream of events coming from the execution of tools.
+
+        The `AgentRun` also provides methods to access the full message history, new messages, and usage statistics,
+        and the final result of the run once it has completed.
+
+        For more details, see the documentation of `AgentRun`.
+
+        Example:
+        ```python
+        from pydantic_ai import Agent
+
+        agent = Agent('openai:gpt-4o')
+
+        async def main():
+            nodes = []
+            async with agent.iter('What is the capital of France?') as agent_run:
+                async for node in agent_run:
+                    nodes.append(node)
+            print(nodes)
+            '''
+            [
+                UserPromptNode(
+                    user_prompt='What is the capital of France?',
+                    instructions=None,
+                    instructions_functions=[],
+                    system_prompts=(),
+                    system_prompt_functions=[],
+                    system_prompt_dynamic_functions={},
+                ),
+                ModelRequestNode(
+                    request=ModelRequest(
+                        parts=[
+                            UserPromptPart(
+                                content='What is the capital of France?',
+                                timestamp=datetime.datetime(...),
+                            )
+                        ]
+                    )
+                ),
+                CallToolsNode(
+                    model_response=ModelResponse(
+                        parts=[TextPart(content='Paris')],
+                        usage=Usage(
+                            requests=1, request_tokens=56, response_tokens=1, total_tokens=57
+                        ),
+                        model_name='gpt-4o',
+                        timestamp=datetime.datetime(...),
+                    )
+                ),
+                End(data=FinalResult(output='Paris')),
+            ]
+            '''
+            print(agent_run.result.output)
+            #> Paris
+        ```
+
+        Args:
+            user_prompt: User input to start/continue the conversation.
+            output_type: Custom output type to use for this run, `output_type` may only be used if the agent has no
+                output validators since output validators would expect an argument that matches the agent's output type.
+            message_history: History of the conversation so far.
+            model: Optional model to use for this run, required if `model` was not set when creating the agent.
+            deps: Optional dependencies to use for this run.
+            model_settings: Optional settings to use for this model's request.
+            usage_limits: Optional limits on model request count or token usage.
+            usage: Optional usage to start with, useful for resuming a conversation or agents used in tools.
+            infer_name: Whether to try to infer the agent name from the call frame if it's not set.
+            toolsets: Optional additional toolsets for this run.
+
+        Returns:
+            The result of the run.
+        """
+        raise NotImplementedError
+        yield
+
+    @contextmanager
+    @abstractmethod
+    def override(
+        self,
+        *,
+        deps: AgentDepsT | _utils.Unset = _utils.UNSET,
+        model: models.Model | models.KnownModelName | str | _utils.Unset = _utils.UNSET,
+        toolsets: Sequence[AbstractToolset[AgentDepsT]] | _utils.Unset = _utils.UNSET,
+        tools: Sequence[Tool[AgentDepsT] | ToolFuncEither[AgentDepsT, ...]] | _utils.Unset = _utils.UNSET,
+    ) -> Iterator[None]:
+        """Context manager to temporarily override agent dependencies, model, or toolsets.
+
+        This is particularly useful when testing.
+        You can find an example of this [here](../testing.md#overriding-model-via-pytest-fixtures).
+
+        Args:
+            deps: The dependencies to use instead of the dependencies passed to the agent run.
+            model: The model to use instead of the model passed to the agent run.
+            toolsets: The toolsets to use instead of the toolsets passed to the agent constructor and agent run.
+            tools: The tools to use instead of the tools registered with the agent.
+        """
+        raise NotImplementedError
+        yield
+
+    def _infer_name(self, function_frame: FrameType | None) -> None:
+        """Infer the agent name from the call frame.
+
+        Usage should be `self._infer_name(inspect.currentframe())`.
+        """
+        assert self.name is None, 'Name already set'
+        if function_frame is not None:  # pragma: no branch
+            if parent_frame := function_frame.f_back:  # pragma: no branch
+                for name, item in parent_frame.f_locals.items():
+                    if item is self:
+                        self.name = name
+                        return
+                if parent_frame.f_locals != parent_frame.f_globals:  # pragma: no branch
+                    # if we couldn't find the agent in locals and globals are a different dict, try globals
+                    for name, item in parent_frame.f_globals.items():
+                        if item is self:
+                            self.name = name
+                            return
+
+    @staticmethod
+    def is_model_request_node(
+        node: _agent_graph.AgentNode[T, S] | End[result.FinalResult[S]],
+    ) -> TypeIs[_agent_graph.ModelRequestNode[T, S]]:
+        """Check if the node is a `ModelRequestNode`, narrowing the type if it is.
+
+        This method preserves the generic parameters while narrowing the type, unlike a direct call to `isinstance`.
+        """
+        return isinstance(node, _agent_graph.ModelRequestNode)
+
+    @staticmethod
+    def is_call_tools_node(
+        node: _agent_graph.AgentNode[T, S] | End[result.FinalResult[S]],
+    ) -> TypeIs[_agent_graph.CallToolsNode[T, S]]:
+        """Check if the node is a `CallToolsNode`, narrowing the type if it is.
+
+        This method preserves the generic parameters while narrowing the type, unlike a direct call to `isinstance`.
+        """
+        return isinstance(node, _agent_graph.CallToolsNode)
+
+    @staticmethod
+    def is_user_prompt_node(
+        node: _agent_graph.AgentNode[T, S] | End[result.FinalResult[S]],
+    ) -> TypeIs[_agent_graph.UserPromptNode[T, S]]:
+        """Check if the node is a `UserPromptNode`, narrowing the type if it is.
+
+        This method preserves the generic parameters while narrowing the type, unlike a direct call to `isinstance`.
+        """
+        return isinstance(node, _agent_graph.UserPromptNode)
+
+    @staticmethod
+    def is_end_node(
+        node: _agent_graph.AgentNode[T, S] | End[result.FinalResult[S]],
+    ) -> TypeIs[End[result.FinalResult[S]]]:
+        """Check if the node is a `End`, narrowing the type if it is.
+
+        This method preserves the generic parameters while narrowing the type, unlike a direct call to `isinstance`.
+        """
+        return isinstance(node, End)
+
+    @abstractmethod
+    async def __aenter__(self) -> AbstractAgent[AgentDepsT, OutputDataT]:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def __aexit__(self, *args: Any) -> bool | None:
+        raise NotImplementedError
+
+    def to_ag_ui(
+        self,
+        *,
+        # Agent.iter parameters
+        output_type: OutputSpec[OutputDataT] | None = None,
+        model: models.Model | models.KnownModelName | str | None = None,
+        deps: AgentDepsT = None,
+        model_settings: ModelSettings | None = None,
+        usage_limits: UsageLimits | None = None,
+        usage: Usage | None = None,
+        infer_name: bool = True,
+        toolsets: Sequence[AbstractToolset[AgentDepsT]] | None = None,
+        # Starlette
+        debug: bool = False,
+        routes: Sequence[BaseRoute] | None = None,
+        middleware: Sequence[Middleware] | None = None,
+        exception_handlers: Mapping[Any, ExceptionHandler] | None = None,
+        on_startup: Sequence[Callable[[], Any]] | None = None,
+        on_shutdown: Sequence[Callable[[], Any]] | None = None,
+        lifespan: Lifespan[AGUIApp[AgentDepsT, OutputDataT]] | None = None,
+    ) -> AGUIApp[AgentDepsT, OutputDataT]:
+        """Convert the agent to an AG-UI application.
+
+        This allows you to use the agent with a compatible AG-UI frontend.
+
+        Example:
+        ```python
+        from pydantic_ai import Agent
+
+        agent = Agent('openai:gpt-4o')
+        app = agent.to_ag_ui()
+        ```
+
+        The `app` is an ASGI application that can be used with any ASGI server.
+
+        To run the application, you can use the following command:
+
+        ```bash
+        uvicorn app:app --host 0.0.0.0 --port 8000
+        ```
+
+        See [AG-UI docs](../ag-ui.md) for more information.
+
+        Args:
+            output_type: Custom output type to use for this run, `output_type` may only be used if the agent has
+                no output validators since output validators would expect an argument that matches the agent's
+                output type.
+            model: Optional model to use for this run, required if `model` was not set when creating the agent.
+            deps: Optional dependencies to use for this run.
+            model_settings: Optional settings to use for this model's request.
+            usage_limits: Optional limits on model request count or token usage.
+            usage: Optional usage to start with, useful for resuming a conversation or agents used in tools.
+            infer_name: Whether to try to infer the agent name from the call frame if it's not set.
+            toolsets: Optional list of toolsets to use for this agent, defaults to the agent's toolset.
+
+            debug: Boolean indicating if debug tracebacks should be returned on errors.
+            routes: A list of routes to serve incoming HTTP and WebSocket requests.
+            middleware: A list of middleware to run for every request. A starlette application will always
+                automatically include two middleware classes. `ServerErrorMiddleware` is added as the very
+                outermost middleware, to handle any uncaught errors occurring anywhere in the entire stack.
+                `ExceptionMiddleware` is added as the very innermost middleware, to deal with handled
+                exception cases occurring in the routing or endpoints.
+            exception_handlers: A mapping of either integer status codes, or exception class types onto
+                callables which handle the exceptions. Exception handler callables should be of the form
+                `handler(request, exc) -> response` and may be either standard functions, or async functions.
+            on_startup: A list of callables to run on application startup. Startup handler callables do not
+                take any arguments, and may be either standard functions, or async functions.
+            on_shutdown: A list of callables to run on application shutdown. Shutdown handler callables do
+                not take any arguments, and may be either standard functions, or async functions.
+            lifespan: A lifespan context function, which can be used to perform startup and shutdown tasks.
+                This is a newer style that replaces the `on_startup` and `on_shutdown` handlers. Use one or
+                the other, not both.
+
+        Returns:
+            An ASGI application for running Pydantic AI agents with AG-UI protocol support.
+        """
+        from .ag_ui import AGUIApp
+
+        return AGUIApp(
+            agent=self,
+            # Agent.iter parameters
+            output_type=output_type,
+            model=model,
+            deps=deps,
+            model_settings=model_settings,
+            usage_limits=usage_limits,
+            usage=usage,
+            infer_name=infer_name,
+            toolsets=toolsets,
+            # Starlette
+            debug=debug,
+            routes=routes,
+            middleware=middleware,
+            exception_handlers=exception_handlers,
+            on_startup=on_startup,
+            on_shutdown=on_shutdown,
+            lifespan=lifespan,
+        )
+
+    def to_a2a(
+        self,
+        *,
+        storage: Storage | None = None,
+        broker: Broker | None = None,
+        # Agent card
+        name: str | None = None,
+        url: str = 'http://localhost:8000',
+        version: str = '1.0.0',
+        description: str | None = None,
+        provider: AgentProvider | None = None,
+        skills: list[Skill] | None = None,
+        # Starlette
+        debug: bool = False,
+        routes: Sequence[Route] | None = None,
+        middleware: Sequence[Middleware] | None = None,
+        exception_handlers: dict[Any, ExceptionHandler] | None = None,
+        lifespan: Lifespan[FastA2A] | None = None,
+    ) -> FastA2A:
+        """Convert the agent to a FastA2A application.
+
+        Example:
+        ```python
+        from pydantic_ai import Agent
+
+        agent = Agent('openai:gpt-4o')
+        app = agent.to_a2a()
+        ```
+
+        The `app` is an ASGI application that can be used with any ASGI server.
+
+        To run the application, you can use the following command:
+
+        ```bash
+        uvicorn app:app --host 0.0.0.0 --port 8000
+        ```
+        """
+        from ._a2a import agent_to_a2a
+
+        return agent_to_a2a(
+            self,
+            storage=storage,
+            broker=broker,
+            name=name,
+            url=url,
+            version=version,
+            description=description,
+            provider=provider,
+            skills=skills,
+            debug=debug,
+            routes=routes,
+            middleware=middleware,
+            exception_handlers=exception_handlers,
+            lifespan=lifespan,
+        )
+
+    async def to_cli(self: Self, deps: AgentDepsT = None, prog_name: str = 'pydantic-ai') -> None:
+        """Run the agent in a CLI chat interface.
+
+        Args:
+            deps: The dependencies to pass to the agent.
+            prog_name: The name of the program to use for the CLI. Defaults to 'pydantic-ai'.
+
+        Example:
+        ```python {title="agent_to_cli.py" test="skip"}
+        from pydantic_ai import Agent
+
+        agent = Agent('openai:gpt-4o', instructions='You always respond in Italian.')
+
+        async def main():
+            await agent.to_cli()
+        ```
+        """
+        from rich.console import Console
+
+        from pydantic_ai._cli import run_chat
+
+        await run_chat(stream=True, agent=self, deps=deps, console=Console(), code_theme='monokai', prog_name=prog_name)
+
+    def to_cli_sync(self: Self, deps: AgentDepsT = None, prog_name: str = 'pydantic-ai') -> None:
+        """Run the agent in a CLI chat interface with the non-async interface.
+
+        Args:
+            deps: The dependencies to pass to the agent.
+            prog_name: The name of the program to use for the CLI. Defaults to 'pydantic-ai'.
+
+        ```python {title="agent_to_cli_sync.py" test="skip"}
+        from pydantic_ai import Agent
+
+        agent = Agent('openai:gpt-4o', instructions='You always respond in Italian.')
+        agent.to_cli_sync()
+        agent.to_cli_sync(prog_name='assistant')
+        ```
+        """
+        return get_event_loop().run_until_complete(self.to_cli(deps=deps, prog_name=prog_name))
+
+
+class WrapperAgent(AbstractAgent[AgentDepsT, OutputDataT]):
+    def __init__(self, wrapped: AbstractAgent[AgentDepsT, OutputDataT]):
+        self.wrapped = wrapped
+
+    @property
+    def model(self) -> models.Model | models.KnownModelName | str | None:
+        return self.wrapped.model
+
+    @property
+    def name(self) -> str | None:
+        return self.wrapped.name
+
+    @name.setter
+    def name(self, value: str | None) -> None:
+        self.wrapped.name = value
+
+    @property
+    def output_type(self) -> OutputSpec[OutputDataT]:
+        return self.wrapped.output_type
+
+    @property
+    def event_stream_handler(self) -> EventStreamHandler[AgentDepsT] | None:
+        return self.wrapped.event_stream_handler
+
+    async def __aenter__(self) -> AbstractAgent[AgentDepsT, OutputDataT]:
+        return await self.wrapped.__aenter__()
+
+    async def __aexit__(self, *args: Any) -> bool | None:
+        return await self.wrapped.__aexit__(*args)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._agent, name)
+
+    @overload
+    def iter(
+        self,
+        user_prompt: str | Sequence[_messages.UserContent] | None = None,
+        *,
+        output_type: None = None,
+        message_history: list[_messages.ModelMessage] | None = None,
+        model: models.Model | models.KnownModelName | str | None = None,
+        deps: AgentDepsT = None,
+        model_settings: ModelSettings | None = None,
+        usage_limits: _usage.UsageLimits | None = None,
+        usage: _usage.Usage | None = None,
+        infer_name: bool = True,
+        toolsets: Sequence[AbstractToolset[AgentDepsT]] | None = None,
+        **_deprecated_kwargs: Never,
+    ) -> AbstractAsyncContextManager[AgentRun[AgentDepsT, OutputDataT]]: ...
+
+    @overload
+    def iter(
+        self,
+        user_prompt: str | Sequence[_messages.UserContent] | None = None,
+        *,
+        output_type: OutputSpec[RunOutputDataT],
+        message_history: list[_messages.ModelMessage] | None = None,
+        model: models.Model | models.KnownModelName | str | None = None,
+        deps: AgentDepsT = None,
+        model_settings: ModelSettings | None = None,
+        usage_limits: _usage.UsageLimits | None = None,
+        usage: _usage.Usage | None = None,
+        infer_name: bool = True,
+        toolsets: Sequence[AbstractToolset[AgentDepsT]] | None = None,
+        **_deprecated_kwargs: Never,
+    ) -> AbstractAsyncContextManager[AgentRun[AgentDepsT, RunOutputDataT]]: ...
+
+    @overload
+    @deprecated('`result_type` is deprecated, use `output_type` instead.')
+    def iter(
+        self,
+        user_prompt: str | Sequence[_messages.UserContent] | None = None,
+        *,
+        result_type: type[RunOutputDataT],
+        message_history: list[_messages.ModelMessage] | None = None,
+        model: models.Model | models.KnownModelName | str | None = None,
+        deps: AgentDepsT = None,
+        model_settings: ModelSettings | None = None,
+        usage_limits: _usage.UsageLimits | None = None,
+        usage: _usage.Usage | None = None,
+        infer_name: bool = True,
+        toolsets: Sequence[AbstractToolset[AgentDepsT]] | None = None,
+    ) -> AbstractAsyncContextManager[AgentRun[AgentDepsT, Any]]: ...
+
+    @asynccontextmanager
+    async def iter(
+        self,
+        user_prompt: str | Sequence[_messages.UserContent] | None = None,
+        *,
+        output_type: OutputSpec[RunOutputDataT] | None = None,
+        message_history: list[_messages.ModelMessage] | None = None,
+        model: models.Model | models.KnownModelName | str | None = None,
+        deps: AgentDepsT = None,
+        model_settings: ModelSettings | None = None,
+        usage_limits: _usage.UsageLimits | None = None,
+        usage: _usage.Usage | None = None,
+        infer_name: bool = True,
+        toolsets: Sequence[AbstractToolset[AgentDepsT]] | None = None,
+        **_deprecated_kwargs: Never,
+    ) -> AsyncIterator[AgentRun[AgentDepsT, Any]]:
+        """A contextmanager which can be used to iterate over the agent graph's nodes as they are executed.
+
+        This method builds an internal agent graph (using system prompts, tools and output schemas) and then returns an
+        `AgentRun` object. The `AgentRun` can be used to async-iterate over the nodes of the graph as they are
+        executed. This is the API to use if you want to consume the outputs coming from each LLM model response, or the
+        stream of events coming from the execution of tools.
+
+        The `AgentRun` also provides methods to access the full message history, new messages, and usage statistics,
+        and the final result of the run once it has completed.
+
+        For more details, see the documentation of `AgentRun`.
+
+        Example:
+        ```python
+        from pydantic_ai import Agent
+
+        agent = Agent('openai:gpt-4o')
+
+        async def main():
+            nodes = []
+            async with agent.iter('What is the capital of France?') as agent_run:
+                async for node in agent_run:
+                    nodes.append(node)
+            print(nodes)
+            '''
+            [
+                UserPromptNode(
+                    user_prompt='What is the capital of France?',
+                    instructions=None,
+                    instructions_functions=[],
+                    system_prompts=(),
+                    system_prompt_functions=[],
+                    system_prompt_dynamic_functions={},
+                ),
+                ModelRequestNode(
+                    request=ModelRequest(
+                        parts=[
+                            UserPromptPart(
+                                content='What is the capital of France?',
+                                timestamp=datetime.datetime(...),
+                            )
+                        ]
+                    )
+                ),
+                CallToolsNode(
+                    model_response=ModelResponse(
+                        parts=[TextPart(content='Paris')],
+                        usage=Usage(
+                            requests=1, request_tokens=56, response_tokens=1, total_tokens=57
+                        ),
+                        model_name='gpt-4o',
+                        timestamp=datetime.datetime(...),
+                    )
+                ),
+                End(data=FinalResult(output='Paris')),
+            ]
+            '''
+            print(agent_run.result.output)
+            #> Paris
+        ```
+
+        Args:
+            user_prompt: User input to start/continue the conversation.
+            output_type: Custom output type to use for this run, `output_type` may only be used if the agent has no
+                output validators since output validators would expect an argument that matches the agent's output type.
+            message_history: History of the conversation so far.
+            model: Optional model to use for this run, required if `model` was not set when creating the agent.
+            deps: Optional dependencies to use for this run.
+            model_settings: Optional settings to use for this model's request.
+            usage_limits: Optional limits on model request count or token usage.
+            usage: Optional usage to start with, useful for resuming a conversation or agents used in tools.
+            infer_name: Whether to try to infer the agent name from the call frame if it's not set.
+            toolsets: Optional additional toolsets for this run.
+
+        Returns:
+            The result of the run.
+        """
+        async with self.wrapped.iter(
+            user_prompt=user_prompt,
+            output_type=output_type,
+            message_history=message_history,
+            model=model,
+            deps=deps,
+            model_settings=model_settings,
+            usage_limits=usage_limits,
+            usage=usage,
+            infer_name=infer_name,
+            toolsets=toolsets,
+        ) as result:
+            yield result
+
+    @contextmanager
+    def override(
+        self,
+        *,
+        deps: AgentDepsT | _utils.Unset = _utils.UNSET,
+        model: models.Model | models.KnownModelName | str | _utils.Unset = _utils.UNSET,
+        toolsets: Sequence[AbstractToolset[AgentDepsT]] | _utils.Unset = _utils.UNSET,
+        tools: Sequence[Tool[AgentDepsT] | ToolFuncEither[AgentDepsT, ...]] | _utils.Unset = _utils.UNSET,
+    ) -> Iterator[None]:
+        """Context manager to temporarily override agent dependencies, model, or toolsets.
+
+        This is particularly useful when testing.
+        You can find an example of this [here](../testing.md#overriding-model-via-pytest-fixtures).
+
+        Args:
+            deps: The dependencies to use instead of the dependencies passed to the agent run.
+            model: The model to use instead of the model passed to the agent run.
+            toolsets: The toolsets to use instead of the toolsets passed to the agent constructor and agent run.
+            tools: The tools to use instead of the tools registered with the agent.
+        """
+        with self.wrapped.override(deps=deps, model=model, toolsets=toolsets, tools=tools):
+            yield
+
+
 @dataclasses.dataclass(init=False)
-class Agent(Generic[AgentDepsT, OutputDataT]):
+class Agent(AbstractAgent[AgentDepsT, OutputDataT]):
     """Class for defining "agents" - a way to have a specific type of "conversation" with an LLM.
 
     Agents are generic in the dependency type they take [`AgentDepsT`][pydantic_ai.tools.AgentDepsT]
@@ -126,13 +1238,13 @@ class Agent(Generic[AgentDepsT, OutputDataT]):
     ```
     """
 
-    model: models.Model | models.KnownModelName | str | None
+    _model: models.Model | models.KnownModelName | str | None
     """The default model configured for this agent.
 
     We allow `str` here since the actual list of allowed models changes frequently.
     """
 
-    name: str | None
+    _name: str | None
     """The name of the agent, used for logging.
 
     If `None`, we try to infer the agent name from the call frame when the agent is first run.
@@ -147,16 +1259,13 @@ class Agent(Generic[AgentDepsT, OutputDataT]):
     be merged with this value, with the runtime argument taking priority.
     """
 
-    output_type: OutputSpec[OutputDataT]
+    _output_type: OutputSpec[OutputDataT]
     """
     The type of data output by agent runs, used to validate the data returned by the model, defaults to `str`.
     """
 
     instrument: InstrumentationSettings | bool | None
     """Options to automatically instrument with OpenTelemetry."""
-
-    event_stream_handler: EventStreamHandler[AgentDepsT] | None
-    """Optional handler for events from the agent stream."""
 
     _instrument_default: ClassVar[InstrumentationSettings | bool] = False
 
@@ -178,6 +1287,8 @@ class Agent(Generic[AgentDepsT, OutputDataT]):
     _prepare_tools: ToolsPrepareFunc[AgentDepsT] | None = dataclasses.field(repr=False)
     _prepare_output_tools: ToolsPrepareFunc[AgentDepsT] | None = dataclasses.field(repr=False)
     _max_result_retries: int = dataclasses.field(repr=False)
+
+    _event_stream_handler: EventStreamHandler[AgentDepsT] | None = dataclasses.field(repr=False)
 
     _enter_lock: Lock = dataclasses.field(repr=False)
     _entered_count: int = dataclasses.field(repr=False)
@@ -347,12 +1458,12 @@ class Agent(Generic[AgentDepsT, OutputDataT]):
             event_stream_handler: TODO: Optional handler for events from the agent stream.
         """
         if model is None or defer_model_check:
-            self.model = model
+            self._model = model
         else:
-            self.model = models.infer_model(model)
+            self._model = models.infer_model(model)
 
+        self._name = name
         self.end_strategy = end_strategy
-        self.name = name
         self.model_settings = model_settings
 
         if 'result_type' in _deprecated_kwargs:
@@ -361,7 +1472,7 @@ class Agent(Generic[AgentDepsT, OutputDataT]):
             warnings.warn('`result_type` is deprecated, use `output_type` instead', DeprecationWarning, stacklevel=2)
             output_type = _deprecated_kwargs.pop('result_type')
 
-        self.output_type = output_type
+        self._output_type = output_type
 
         self.instrument = instrument
 
@@ -439,7 +1550,7 @@ class Agent(Generic[AgentDepsT, OutputDataT]):
 
         self.history_processors = history_processors or []
 
-        self.event_stream_handler = event_stream_handler
+        self._event_stream_handler = event_stream_handler
 
         self._override_deps: ContextVar[_utils.Option[AgentDepsT]] = ContextVar('_override_deps', default=None)
         self._override_model: ContextVar[_utils.Option[models.Model]] = ContextVar('_override_model', default=None)
@@ -459,134 +1570,32 @@ class Agent(Generic[AgentDepsT, OutputDataT]):
         """Set the instrumentation options for all agents where `instrument` is not set."""
         Agent._instrument_default = instrument
 
-    @overload
-    async def run(
-        self,
-        user_prompt: str | Sequence[_messages.UserContent] | None = None,
-        *,
-        output_type: None = None,
-        message_history: list[_messages.ModelMessage] | None = None,
-        model: models.Model | models.KnownModelName | str | None = None,
-        deps: AgentDepsT = None,
-        model_settings: ModelSettings | None = None,
-        usage_limits: _usage.UsageLimits | None = None,
-        usage: _usage.Usage | None = None,
-        infer_name: bool = True,
-        toolsets: Sequence[AbstractToolset[AgentDepsT]] | None = None,
-    ) -> AgentRunResult[OutputDataT]: ...
+    @property
+    def model(self) -> models.Model | models.KnownModelName | str | None:
+        return self._model
 
-    @overload
-    async def run(
-        self,
-        user_prompt: str | Sequence[_messages.UserContent] | None = None,
-        *,
-        output_type: OutputSpec[RunOutputDataT],
-        message_history: list[_messages.ModelMessage] | None = None,
-        model: models.Model | models.KnownModelName | str | None = None,
-        deps: AgentDepsT = None,
-        model_settings: ModelSettings | None = None,
-        usage_limits: _usage.UsageLimits | None = None,
-        usage: _usage.Usage | None = None,
-        infer_name: bool = True,
-        toolsets: Sequence[AbstractToolset[AgentDepsT]] | None = None,
-    ) -> AgentRunResult[RunOutputDataT]: ...
+    @model.setter
+    def model(self, value: models.Model | models.KnownModelName | str | None) -> None:
+        self._model = value
 
-    @overload
-    @deprecated('`result_type` is deprecated, use `output_type` instead.')
-    async def run(
-        self,
-        user_prompt: str | Sequence[_messages.UserContent] | None = None,
-        *,
-        result_type: type[RunOutputDataT],
-        message_history: list[_messages.ModelMessage] | None = None,
-        model: models.Model | models.KnownModelName | str | None = None,
-        deps: AgentDepsT = None,
-        model_settings: ModelSettings | None = None,
-        usage_limits: _usage.UsageLimits | None = None,
-        usage: _usage.Usage | None = None,
-        infer_name: bool = True,
-        toolsets: Sequence[AbstractToolset[AgentDepsT]] | None = None,
-    ) -> AgentRunResult[RunOutputDataT]: ...
+    @property
+    def name(self) -> str | None:
+        return self._name
 
-    async def run(
-        self,
-        user_prompt: str | Sequence[_messages.UserContent] | None = None,
-        *,
-        output_type: OutputSpec[RunOutputDataT] | None = None,
-        message_history: list[_messages.ModelMessage] | None = None,
-        model: models.Model | models.KnownModelName | str | None = None,
-        deps: AgentDepsT = None,
-        model_settings: ModelSettings | None = None,
-        usage_limits: _usage.UsageLimits | None = None,
-        usage: _usage.Usage | None = None,
-        infer_name: bool = True,
-        toolsets: Sequence[AbstractToolset[AgentDepsT]] | None = None,
-        **_deprecated_kwargs: Never,
-    ) -> AgentRunResult[Any]:
-        """Run the agent with a user prompt in async mode.
+    @name.setter
+    def name(self, value: str | None) -> None:
+        self._name = value
 
-        This method builds an internal agent graph (using system prompts, tools and result schemas) and then
-        runs the graph to completion. The result of the run is returned.
+    @property
+    def output_type(self) -> OutputSpec[OutputDataT]:
+        return self._output_type
 
-        Example:
-        ```python
-        from pydantic_ai import Agent
+    @property
+    def event_stream_handler(self) -> EventStreamHandler[AgentDepsT] | None:
+        return self._event_stream_handler
 
-        agent = Agent('openai:gpt-4o')
-
-        async def main():
-            agent_run = await agent.run('What is the capital of France?')
-            print(agent_run.output)
-            #> Paris
-        ```
-
-        Args:
-            user_prompt: User input to start/continue the conversation.
-            output_type: Custom output type to use for this run, `output_type` may only be used if the agent has no
-                output validators since output validators would expect an argument that matches the agent's output type.
-            message_history: History of the conversation so far.
-            model: Optional model to use for this run, required if `model` was not set when creating the agent.
-            deps: Optional dependencies to use for this run.
-            model_settings: Optional settings to use for this model's request.
-            usage_limits: Optional limits on model request count or token usage.
-            usage: Optional usage to start with, useful for resuming a conversation or agents used in tools.
-            infer_name: Whether to try to infer the agent name from the call frame if it's not set.
-            toolsets: Optional additional toolsets for this run.
-
-        Returns:
-            The result of the run.
-        """
-        if infer_name and self.name is None:
-            self._infer_name(inspect.currentframe())
-
-        if 'result_type' in _deprecated_kwargs:  # pragma: no cover
-            if output_type is not str:
-                raise TypeError('`result_type` and `output_type` cannot be set at the same time.')
-            warnings.warn('`result_type` is deprecated, use `output_type` instead.', DeprecationWarning, stacklevel=2)
-            output_type = _deprecated_kwargs.pop('result_type')
-
-        _utils.validate_empty_kwargs(_deprecated_kwargs)
-
-        async with self.iter(
-            user_prompt=user_prompt,
-            output_type=output_type,
-            message_history=message_history,
-            model=model,
-            deps=deps,
-            model_settings=model_settings,
-            usage_limits=usage_limits,
-            usage=usage,
-            toolsets=toolsets,
-        ) as agent_run:
-            async for node in agent_run:
-                if self.event_stream_handler is not None and (
-                    self.is_model_request_node(node) or self.is_call_tools_node(node)
-                ):
-                    async with node.stream(agent_run.ctx) as stream:
-                        await self.event_stream_handler(_agent_graph.build_run_context(agent_run.ctx), stream)
-
-        assert agent_run.result is not None, 'The graph run did not finish properly'
-        return agent_run.result
+    def __repr__(self) -> str:  # pragma: no cover
+        return f'{type(self).__name__}(model={self.model!r}, name={self.name!r}, end_strategy={self.end_strategy!r}, model_settings={self.model_settings!r}, output_type={self.output_type!r}, instrument={self.instrument!r})'
 
     @overload
     def iter(
@@ -900,312 +1909,6 @@ class Agent(Generic[AgentDepsT, OutputDataT]):
                 }
             ),
         }
-
-    @overload
-    def run_sync(
-        self,
-        user_prompt: str | Sequence[_messages.UserContent] | None = None,
-        *,
-        message_history: list[_messages.ModelMessage] | None = None,
-        model: models.Model | models.KnownModelName | str | None = None,
-        deps: AgentDepsT = None,
-        model_settings: ModelSettings | None = None,
-        usage_limits: _usage.UsageLimits | None = None,
-        usage: _usage.Usage | None = None,
-        infer_name: bool = True,
-        toolsets: Sequence[AbstractToolset[AgentDepsT]] | None = None,
-    ) -> AgentRunResult[OutputDataT]: ...
-
-    @overload
-    def run_sync(
-        self,
-        user_prompt: str | Sequence[_messages.UserContent] | None = None,
-        *,
-        output_type: OutputSpec[RunOutputDataT] | None = None,
-        message_history: list[_messages.ModelMessage] | None = None,
-        model: models.Model | models.KnownModelName | str | None = None,
-        deps: AgentDepsT = None,
-        model_settings: ModelSettings | None = None,
-        usage_limits: _usage.UsageLimits | None = None,
-        usage: _usage.Usage | None = None,
-        infer_name: bool = True,
-        toolsets: Sequence[AbstractToolset[AgentDepsT]] | None = None,
-    ) -> AgentRunResult[RunOutputDataT]: ...
-
-    @overload
-    @deprecated('`result_type` is deprecated, use `output_type` instead.')
-    def run_sync(
-        self,
-        user_prompt: str | Sequence[_messages.UserContent] | None = None,
-        *,
-        result_type: type[RunOutputDataT],
-        message_history: list[_messages.ModelMessage] | None = None,
-        model: models.Model | models.KnownModelName | str | None = None,
-        deps: AgentDepsT = None,
-        model_settings: ModelSettings | None = None,
-        usage_limits: _usage.UsageLimits | None = None,
-        usage: _usage.Usage | None = None,
-        infer_name: bool = True,
-        toolsets: Sequence[AbstractToolset[AgentDepsT]] | None = None,
-    ) -> AgentRunResult[RunOutputDataT]: ...
-
-    def run_sync(
-        self,
-        user_prompt: str | Sequence[_messages.UserContent] | None = None,
-        *,
-        output_type: OutputSpec[RunOutputDataT] | None = None,
-        message_history: list[_messages.ModelMessage] | None = None,
-        model: models.Model | models.KnownModelName | str | None = None,
-        deps: AgentDepsT = None,
-        model_settings: ModelSettings | None = None,
-        usage_limits: _usage.UsageLimits | None = None,
-        usage: _usage.Usage | None = None,
-        infer_name: bool = True,
-        toolsets: Sequence[AbstractToolset[AgentDepsT]] | None = None,
-        **_deprecated_kwargs: Never,
-    ) -> AgentRunResult[Any]:
-        """Synchronously run the agent with a user prompt.
-
-        This is a convenience method that wraps [`self.run`][pydantic_ai.Agent.run] with `loop.run_until_complete(...)`.
-        You therefore can't use this method inside async code or if there's an active event loop.
-
-        Example:
-        ```python
-        from pydantic_ai import Agent
-
-        agent = Agent('openai:gpt-4o')
-
-        result_sync = agent.run_sync('What is the capital of Italy?')
-        print(result_sync.output)
-        #> Rome
-        ```
-
-        Args:
-            user_prompt: User input to start/continue the conversation.
-            output_type: Custom output type to use for this run, `output_type` may only be used if the agent has no
-                output validators since output validators would expect an argument that matches the agent's output type.
-            message_history: History of the conversation so far.
-            model: Optional model to use for this run, required if `model` was not set when creating the agent.
-            deps: Optional dependencies to use for this run.
-            model_settings: Optional settings to use for this model's request.
-            usage_limits: Optional limits on model request count or token usage.
-            usage: Optional usage to start with, useful for resuming a conversation or agents used in tools.
-            infer_name: Whether to try to infer the agent name from the call frame if it's not set.
-            toolsets: Optional additional toolsets for this run.
-
-        Returns:
-            The result of the run.
-        """
-        if infer_name and self.name is None:
-            self._infer_name(inspect.currentframe())
-
-        if 'result_type' in _deprecated_kwargs:  # pragma: no cover
-            if output_type is not str:
-                raise TypeError('`result_type` and `output_type` cannot be set at the same time.')
-            warnings.warn('`result_type` is deprecated, use `output_type` instead.', DeprecationWarning, stacklevel=2)
-            output_type = _deprecated_kwargs.pop('result_type')
-
-        _utils.validate_empty_kwargs(_deprecated_kwargs)
-
-        return get_event_loop().run_until_complete(
-            self.run(
-                user_prompt,
-                output_type=output_type,
-                message_history=message_history,
-                model=model,
-                deps=deps,
-                model_settings=model_settings,
-                usage_limits=usage_limits,
-                usage=usage,
-                infer_name=False,
-                toolsets=toolsets,
-            )
-        )
-
-    @overload
-    def run_stream(
-        self,
-        user_prompt: str | Sequence[_messages.UserContent] | None = None,
-        *,
-        message_history: list[_messages.ModelMessage] | None = None,
-        model: models.Model | models.KnownModelName | None = None,
-        deps: AgentDepsT = None,
-        model_settings: ModelSettings | None = None,
-        usage_limits: _usage.UsageLimits | None = None,
-        usage: _usage.Usage | None = None,
-        infer_name: bool = True,
-        toolsets: Sequence[AbstractToolset[AgentDepsT]] | None = None,
-    ) -> AbstractAsyncContextManager[result.StreamedRunResult[AgentDepsT, OutputDataT]]: ...
-
-    @overload
-    def run_stream(
-        self,
-        user_prompt: str | Sequence[_messages.UserContent],
-        *,
-        output_type: OutputSpec[RunOutputDataT],
-        message_history: list[_messages.ModelMessage] | None = None,
-        model: models.Model | models.KnownModelName | str | None = None,
-        deps: AgentDepsT = None,
-        model_settings: ModelSettings | None = None,
-        usage_limits: _usage.UsageLimits | None = None,
-        usage: _usage.Usage | None = None,
-        infer_name: bool = True,
-        toolsets: Sequence[AbstractToolset[AgentDepsT]] | None = None,
-    ) -> AbstractAsyncContextManager[result.StreamedRunResult[AgentDepsT, RunOutputDataT]]: ...
-
-    @overload
-    @deprecated('`result_type` is deprecated, use `output_type` instead.')
-    def run_stream(
-        self,
-        user_prompt: str | Sequence[_messages.UserContent] | None = None,
-        *,
-        result_type: type[RunOutputDataT],
-        message_history: list[_messages.ModelMessage] | None = None,
-        model: models.Model | models.KnownModelName | str | None = None,
-        deps: AgentDepsT = None,
-        model_settings: ModelSettings | None = None,
-        usage_limits: _usage.UsageLimits | None = None,
-        usage: _usage.Usage | None = None,
-        infer_name: bool = True,
-        toolsets: Sequence[AbstractToolset[AgentDepsT]] | None = None,
-    ) -> AbstractAsyncContextManager[result.StreamedRunResult[AgentDepsT, RunOutputDataT]]: ...
-
-    @asynccontextmanager
-    async def run_stream(  # noqa C901
-        self,
-        user_prompt: str | Sequence[_messages.UserContent] | None = None,
-        *,
-        output_type: OutputSpec[RunOutputDataT] | None = None,
-        message_history: list[_messages.ModelMessage] | None = None,
-        model: models.Model | models.KnownModelName | str | None = None,
-        deps: AgentDepsT = None,
-        model_settings: ModelSettings | None = None,
-        usage_limits: _usage.UsageLimits | None = None,
-        usage: _usage.Usage | None = None,
-        infer_name: bool = True,
-        toolsets: Sequence[AbstractToolset[AgentDepsT]] | None = None,
-        **_deprecated_kwargs: Never,
-    ) -> AsyncIterator[result.StreamedRunResult[AgentDepsT, Any]]:
-        """Run the agent with a user prompt in async mode, returning a streamed response.
-
-        Example:
-        ```python
-        from pydantic_ai import Agent
-
-        agent = Agent('openai:gpt-4o')
-
-        async def main():
-            async with agent.run_stream('What is the capital of the UK?') as response:
-                print(await response.get_output())
-                #> London
-        ```
-
-        Args:
-            user_prompt: User input to start/continue the conversation.
-            output_type: Custom output type to use for this run, `output_type` may only be used if the agent has no
-                output validators since output validators would expect an argument that matches the agent's output type.
-            message_history: History of the conversation so far.
-            model: Optional model to use for this run, required if `model` was not set when creating the agent.
-            deps: Optional dependencies to use for this run.
-            model_settings: Optional settings to use for this model's request.
-            usage_limits: Optional limits on model request count or token usage.
-            usage: Optional usage to start with, useful for resuming a conversation or agents used in tools.
-            infer_name: Whether to try to infer the agent name from the call frame if it's not set.
-            toolsets: Optional additional toolsets for this run.
-
-        Returns:
-            The result of the run.
-        """
-        # TODO: We need to deprecate this now that we have the `iter` method.
-        #   Before that, though, we should add an event for when we reach the final result of the stream.
-        if infer_name and self.name is None:
-            # f_back because `asynccontextmanager` adds one frame
-            if frame := inspect.currentframe():  # pragma: no branch
-                self._infer_name(frame.f_back)
-
-        if 'result_type' in _deprecated_kwargs:  # pragma: no cover
-            if output_type is not str:
-                raise TypeError('`result_type` and `output_type` cannot be set at the same time.')
-            warnings.warn('`result_type` is deprecated, use `output_type` instead.', DeprecationWarning, stacklevel=2)
-            output_type = _deprecated_kwargs.pop('result_type')
-
-        _utils.validate_empty_kwargs(_deprecated_kwargs)
-
-        yielded = False
-        async with self.iter(
-            user_prompt,
-            output_type=output_type,
-            message_history=message_history,
-            model=model,
-            deps=deps,
-            model_settings=model_settings,
-            usage_limits=usage_limits,
-            usage=usage,
-            infer_name=False,
-            toolsets=toolsets,
-        ) as agent_run:
-            first_node = agent_run.next_node  # start with the first node
-            assert isinstance(first_node, _agent_graph.UserPromptNode)  # the first node should be a user prompt node
-            node = first_node
-            while True:
-                if self.is_model_request_node(node):
-                    graph_ctx = agent_run.ctx
-                    async with node.stream(graph_ctx) as stream:
-
-                        async def stream_to_final(s: AgentStream) -> FinalResult[AgentStream] | None:
-                            async for event in stream:
-                                if isinstance(event, _messages.FinalResultEvent):
-                                    return FinalResult(s, event.tool_name, event.tool_call_id)
-                            return None
-
-                        final_result = await stream_to_final(stream)
-                        if final_result is not None:
-                            if yielded:
-                                raise exceptions.AgentRunError('Agent run produced final results')  # pragma: no cover
-                            yielded = True
-
-                            messages = graph_ctx.state.message_history.copy()
-
-                            async def on_complete() -> None:
-                                """Called when the stream has completed.
-
-                                The model response will have been added to messages by now
-                                by `StreamedRunResult._marked_completed`.
-                                """
-                                last_message = messages[-1]
-                                assert isinstance(last_message, _messages.ModelResponse)
-                                tool_calls = [
-                                    part for part in last_message.parts if isinstance(part, _messages.ToolCallPart)
-                                ]
-
-                                parts: list[_messages.ModelRequestPart] = []
-                                async for _event in _agent_graph.process_function_tools(
-                                    graph_ctx.deps.tool_manager,
-                                    tool_calls,
-                                    final_result,
-                                    graph_ctx,
-                                    parts,
-                                ):
-                                    pass
-                                if parts:
-                                    messages.append(_messages.ModelRequest(parts))
-
-                            yield StreamedRunResult(
-                                messages,
-                                graph_ctx.deps.new_message_index,
-                                stream,
-                                on_complete,
-                            )
-                            break
-                next_node = await agent_run.next(node)
-                if not isinstance(next_node, _agent_graph.AgentNode):
-                    raise exceptions.AgentRunError(  # pragma: no cover
-                        'Should have produced a StreamedRunResult before getting here'
-                    )
-                node = cast(_agent_graph.AgentNode[Any, Any], next_node)
-
-        if not yielded:
-            raise exceptions.AgentRunError('Agent run finished without producing a final result')  # pragma: no cover
 
     @contextmanager
     def override(
@@ -1745,25 +2448,6 @@ class Agent(Generic[AgentDepsT, OutputDataT]):
         """
         return self._get_toolset()
 
-    def _infer_name(self, function_frame: FrameType | None) -> None:
-        """Infer the agent name from the call frame.
-
-        Usage should be `self._infer_name(inspect.currentframe())`.
-        """
-        assert self.name is None, 'Name already set'
-        if function_frame is not None:  # pragma: no branch
-            if parent_frame := function_frame.f_back:  # pragma: no branch
-                for name, item in parent_frame.f_locals.items():
-                    if item is self:
-                        self.name = name
-                        return
-                if parent_frame.f_locals != parent_frame.f_globals:  # pragma: no branch
-                    # if we couldn't find the agent in locals and globals are a different dict, try globals
-                    for name, item in parent_frame.f_globals.items():
-                        if item is self:
-                            self.name = name
-                            return
-
     @property
     @deprecated(
         'The `last_run_messages` attribute has been removed, use `capture_run_messages` instead.', category=None
@@ -1790,47 +2474,7 @@ class Agent(Generic[AgentDepsT, OutputDataT]):
 
         return schema  # pyright: ignore[reportReturnType]
 
-    @staticmethod
-    def is_model_request_node(
-        node: _agent_graph.AgentNode[T, S] | End[result.FinalResult[S]],
-    ) -> TypeIs[_agent_graph.ModelRequestNode[T, S]]:
-        """Check if the node is a `ModelRequestNode`, narrowing the type if it is.
-
-        This method preserves the generic parameters while narrowing the type, unlike a direct call to `isinstance`.
-        """
-        return isinstance(node, _agent_graph.ModelRequestNode)
-
-    @staticmethod
-    def is_call_tools_node(
-        node: _agent_graph.AgentNode[T, S] | End[result.FinalResult[S]],
-    ) -> TypeIs[_agent_graph.CallToolsNode[T, S]]:
-        """Check if the node is a `CallToolsNode`, narrowing the type if it is.
-
-        This method preserves the generic parameters while narrowing the type, unlike a direct call to `isinstance`.
-        """
-        return isinstance(node, _agent_graph.CallToolsNode)
-
-    @staticmethod
-    def is_user_prompt_node(
-        node: _agent_graph.AgentNode[T, S] | End[result.FinalResult[S]],
-    ) -> TypeIs[_agent_graph.UserPromptNode[T, S]]:
-        """Check if the node is a `UserPromptNode`, narrowing the type if it is.
-
-        This method preserves the generic parameters while narrowing the type, unlike a direct call to `isinstance`.
-        """
-        return isinstance(node, _agent_graph.UserPromptNode)
-
-    @staticmethod
-    def is_end_node(
-        node: _agent_graph.AgentNode[T, S] | End[result.FinalResult[S]],
-    ) -> TypeIs[End[result.FinalResult[S]]]:
-        """Check if the node is a `End`, narrowing the type if it is.
-
-        This method preserves the generic parameters while narrowing the type, unlike a direct call to `isinstance`.
-        """
-        return isinstance(node, End)
-
-    async def __aenter__(self) -> Self:
+    async def __aenter__(self) -> AbstractAgent[AgentDepsT, OutputDataT]:
         """Enter the agent context.
 
         This will start all [`MCPServerStdio`s][pydantic_ai.mcp.MCPServerStdio] registered as `toolsets` so they are ready to be used.
@@ -1892,201 +2536,6 @@ class Agent(Generic[AgentDepsT, OutputDataT]):
 
         async with self:
             yield
-
-    def to_ag_ui(
-        self,
-        *,
-        # Agent.iter parameters
-        output_type: OutputSpec[OutputDataT] | None = None,
-        model: models.Model | models.KnownModelName | str | None = None,
-        deps: AgentDepsT = None,
-        model_settings: ModelSettings | None = None,
-        usage_limits: UsageLimits | None = None,
-        usage: Usage | None = None,
-        infer_name: bool = True,
-        toolsets: Sequence[AbstractToolset[AgentDepsT]] | None = None,
-        # Starlette
-        debug: bool = False,
-        routes: Sequence[BaseRoute] | None = None,
-        middleware: Sequence[Middleware] | None = None,
-        exception_handlers: Mapping[Any, ExceptionHandler] | None = None,
-        on_startup: Sequence[Callable[[], Any]] | None = None,
-        on_shutdown: Sequence[Callable[[], Any]] | None = None,
-        lifespan: Lifespan[AGUIApp[AgentDepsT, OutputDataT]] | None = None,
-    ) -> AGUIApp[AgentDepsT, OutputDataT]:
-        """Convert the agent to an AG-UI application.
-
-        This allows you to use the agent with a compatible AG-UI frontend.
-
-        Example:
-        ```python
-        from pydantic_ai import Agent
-
-        agent = Agent('openai:gpt-4o')
-        app = agent.to_ag_ui()
-        ```
-
-        The `app` is an ASGI application that can be used with any ASGI server.
-
-        To run the application, you can use the following command:
-
-        ```bash
-        uvicorn app:app --host 0.0.0.0 --port 8000
-        ```
-
-        See [AG-UI docs](../ag-ui.md) for more information.
-
-        Args:
-            output_type: Custom output type to use for this run, `output_type` may only be used if the agent has
-                no output validators since output validators would expect an argument that matches the agent's
-                output type.
-            model: Optional model to use for this run, required if `model` was not set when creating the agent.
-            deps: Optional dependencies to use for this run.
-            model_settings: Optional settings to use for this model's request.
-            usage_limits: Optional limits on model request count or token usage.
-            usage: Optional usage to start with, useful for resuming a conversation or agents used in tools.
-            infer_name: Whether to try to infer the agent name from the call frame if it's not set.
-            toolsets: Optional list of toolsets to use for this agent, defaults to the agent's toolset.
-
-            debug: Boolean indicating if debug tracebacks should be returned on errors.
-            routes: A list of routes to serve incoming HTTP and WebSocket requests.
-            middleware: A list of middleware to run for every request. A starlette application will always
-                automatically include two middleware classes. `ServerErrorMiddleware` is added as the very
-                outermost middleware, to handle any uncaught errors occurring anywhere in the entire stack.
-                `ExceptionMiddleware` is added as the very innermost middleware, to deal with handled
-                exception cases occurring in the routing or endpoints.
-            exception_handlers: A mapping of either integer status codes, or exception class types onto
-                callables which handle the exceptions. Exception handler callables should be of the form
-                `handler(request, exc) -> response` and may be either standard functions, or async functions.
-            on_startup: A list of callables to run on application startup. Startup handler callables do not
-                take any arguments, and may be either standard functions, or async functions.
-            on_shutdown: A list of callables to run on application shutdown. Shutdown handler callables do
-                not take any arguments, and may be either standard functions, or async functions.
-            lifespan: A lifespan context function, which can be used to perform startup and shutdown tasks.
-                This is a newer style that replaces the `on_startup` and `on_shutdown` handlers. Use one or
-                the other, not both.
-
-        Returns:
-            An ASGI application for running Pydantic AI agents with AG-UI protocol support.
-        """
-        from .ag_ui import AGUIApp
-
-        return AGUIApp(
-            agent=self,
-            # Agent.iter parameters
-            output_type=output_type,
-            model=model,
-            deps=deps,
-            model_settings=model_settings,
-            usage_limits=usage_limits,
-            usage=usage,
-            infer_name=infer_name,
-            toolsets=toolsets,
-            # Starlette
-            debug=debug,
-            routes=routes,
-            middleware=middleware,
-            exception_handlers=exception_handlers,
-            on_startup=on_startup,
-            on_shutdown=on_shutdown,
-            lifespan=lifespan,
-        )
-
-    def to_a2a(
-        self,
-        *,
-        storage: Storage | None = None,
-        broker: Broker | None = None,
-        # Agent card
-        name: str | None = None,
-        url: str = 'http://localhost:8000',
-        version: str = '1.0.0',
-        description: str | None = None,
-        provider: AgentProvider | None = None,
-        skills: list[Skill] | None = None,
-        # Starlette
-        debug: bool = False,
-        routes: Sequence[Route] | None = None,
-        middleware: Sequence[Middleware] | None = None,
-        exception_handlers: dict[Any, ExceptionHandler] | None = None,
-        lifespan: Lifespan[FastA2A] | None = None,
-    ) -> FastA2A:
-        """Convert the agent to a FastA2A application.
-
-        Example:
-        ```python
-        from pydantic_ai import Agent
-
-        agent = Agent('openai:gpt-4o')
-        app = agent.to_a2a()
-        ```
-
-        The `app` is an ASGI application that can be used with any ASGI server.
-
-        To run the application, you can use the following command:
-
-        ```bash
-        uvicorn app:app --host 0.0.0.0 --port 8000
-        ```
-        """
-        from ._a2a import agent_to_a2a
-
-        return agent_to_a2a(
-            self,
-            storage=storage,
-            broker=broker,
-            name=name,
-            url=url,
-            version=version,
-            description=description,
-            provider=provider,
-            skills=skills,
-            debug=debug,
-            routes=routes,
-            middleware=middleware,
-            exception_handlers=exception_handlers,
-            lifespan=lifespan,
-        )
-
-    async def to_cli(self: Self, deps: AgentDepsT = None, prog_name: str = 'pydantic-ai') -> None:
-        """Run the agent in a CLI chat interface.
-
-        Args:
-            deps: The dependencies to pass to the agent.
-            prog_name: The name of the program to use for the CLI. Defaults to 'pydantic-ai'.
-
-        Example:
-        ```python {title="agent_to_cli.py" test="skip"}
-        from pydantic_ai import Agent
-
-        agent = Agent('openai:gpt-4o', instructions='You always respond in Italian.')
-
-        async def main():
-            await agent.to_cli()
-        ```
-        """
-        from rich.console import Console
-
-        from pydantic_ai._cli import run_chat
-
-        await run_chat(stream=True, agent=self, deps=deps, console=Console(), code_theme='monokai', prog_name=prog_name)
-
-    def to_cli_sync(self: Self, deps: AgentDepsT = None, prog_name: str = 'pydantic-ai') -> None:
-        """Run the agent in a CLI chat interface with the non-async interface.
-
-        Args:
-            deps: The dependencies to pass to the agent.
-            prog_name: The name of the program to use for the CLI. Defaults to 'pydantic-ai'.
-
-        ```python {title="agent_to_cli_sync.py" test="skip"}
-        from pydantic_ai import Agent
-
-        agent = Agent('openai:gpt-4o', instructions='You always respond in Italian.')
-        agent.to_cli_sync()
-        agent.to_cli_sync(prog_name='assistant')
-        ```
-        """
-        return get_event_loop().run_until_complete(self.to_cli(deps=deps, prog_name=prog_name))
 
 
 @dataclasses.dataclass(repr=False)

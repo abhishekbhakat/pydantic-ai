@@ -15,8 +15,8 @@ from pydantic_ai.ext.temporal import (
     AgentPlugin,
     LogfirePlugin,
     PydanticAIPlugin,
+    TemporalAgent,
     TemporalRunContextWithDeps,
-    temporalize_agent,
 )
 from pydantic_ai.mcp import MCPServerStdio
 from pydantic_ai.messages import AgentStreamEvent, HandleResponseEvent
@@ -54,7 +54,7 @@ agent = Agent(
 
 # This needs to be called in the same scope where the `agent` is bound to the workflow,
 # as it modifies the `agent` object in place to swap out methods that use IO for ones that use Temporal activities.
-temporalize_agent(
+temporal_agent = TemporalAgent(
     agent,
     activity_config=ActivityConfig(start_to_close_timeout=timedelta(seconds=60)),
     toolset_activity_config={
@@ -77,7 +77,7 @@ with workflow.unsafe.imports_passed_through():
 class MyAgentWorkflow:
     @workflow.run
     async def run(self, prompt: str, deps: Deps) -> str:
-        result = await agent.run(prompt, deps=deps)
+        result = await temporal_agent.run(prompt, deps=deps)
         return result.output
 
 
@@ -100,7 +100,7 @@ async def main():
         client,
         task_queue=TASK_QUEUE,
         workflows=[MyAgentWorkflow],
-        plugins=[AgentPlugin(agent)],
+        plugins=[AgentPlugin(temporal_agent)],
     ):
         output = await client.execute_workflow(  # pyright: ignore[reportUnknownMemberType]
             MyAgentWorkflow.run,

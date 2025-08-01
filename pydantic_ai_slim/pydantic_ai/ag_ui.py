@@ -72,7 +72,7 @@ from collections.abc import AsyncGenerator
 from pydantic import BaseModel, ValidationError
 
 from ._agent_graph import CallToolsNode, ModelRequestNode
-from .agent import Agent, AgentRun, RunOutputDataT
+from .agent import AbstractAgent, AgentRun, RunOutputDataT
 from .messages import (
     AgentStreamEvent,
     FunctionToolResultEvent,
@@ -115,7 +115,7 @@ class AGUIApp(Generic[AgentDepsT, OutputDataT], Starlette):
 
     def __init__(
         self,
-        agent: Agent[AgentDepsT, OutputDataT],
+        agent: AbstractAgent[AgentDepsT, OutputDataT],
         *,
         # Agent.iter parameters.
         output_type: OutputSpec[OutputDataT] | None = None,
@@ -223,7 +223,7 @@ class _Adapter(Generic[AgentDepsT, OutputDataT]):
         agent: The Pydantic AI `Agent` to adapt.
     """
 
-    agent: Agent[AgentDepsT, OutputDataT] = field(repr=False)
+    agent: AbstractAgent[AgentDepsT, OutputDataT] = field(repr=False)
 
     async def run(
         self,
