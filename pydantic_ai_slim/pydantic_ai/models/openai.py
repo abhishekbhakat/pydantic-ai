@@ -6,7 +6,7 @@ from collections.abc import AsyncIterable, AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime
-from typing import Any, Literal, cast, overload
+from typing import Any, Literal, TypeGuard, cast, overload
 
 from pydantic import ValidationError
 from pydantic_core import to_json
@@ -16,7 +16,12 @@ from .. import ModelHTTPError, UnexpectedModelBehavior, _utils, usage
 from .._output import DEFAULT_OUTPUT_TOOL_NAME, OutputObjectDefinition
 from .._run_context import RunContext
 from .._thinking_part import split_content_into_text_and_thinking
-from .._utils import guard_tool_call_id as _guard_tool_call_id, now_utc as _now_utc, number_to_datetime
+from .._utils import (
+    PeekableAsyncStream,
+    guard_tool_call_id as _guard_tool_call_id,
+    now_utc as _now_utc,
+    number_to_datetime,
+)
 from ..builtin_tools import CodeExecutionTool, WebSearchTool
 from ..exceptions import UserError
 from ..messages import (
@@ -48,6 +53,11 @@ from ..providers import Provider, infer_provider
 from ..settings import ModelSettings
 from ..tools import ToolDefinition
 from . import Model, ModelRequestParameters, StreamedResponse, check_allow_model_requests, download_item, get_user_agent
+from ._openai_compat import (
+    completions_create,
+    process_response,
+    process_streamed_response,
+)
 
 try:
     from openai import NOT_GIVEN, APIStatusError, AsyncOpenAI, AsyncStream, NotGiven
@@ -452,8 +462,6 @@ class OpenAIChatModel(Model):
         else:
             tool_choice = 'auto'
 
-        openai_messages = await self._map_messages(messages)
-
         response_format: chat.completion_create_params.ResponseFormat | None = None
         if model_request_parameters.output_mode == 'native':
             output_object = model_request_parameters.output_object
@@ -468,41 +476,38 @@ class OpenAIChatModel(Model):
         for setting in unsupported_model_settings:
             model_settings.pop(setting, None)
 
-        try:
-            extra_headers = model_settings.get('extra_headers', {})
-            extra_headers.setdefault('User-Agent', get_user_agent())
-            return await self.client.chat.completions.create(
-                model=self._model_name,
-                messages=openai_messages,
-                parallel_tool_calls=model_settings.get('parallel_tool_calls', NOT_GIVEN),
-                tools=tools or NOT_GIVEN,
-                tool_choice=tool_choice or NOT_GIVEN,
-                stream=stream,
-                stream_options={'include_usage': True} if stream else NOT_GIVEN,
-                stop=model_settings.get('stop_sequences', NOT_GIVEN),
-                max_completion_tokens=model_settings.get('max_tokens', NOT_GIVEN),
-                timeout=model_settings.get('timeout', NOT_GIVEN),
-                response_format=response_format or NOT_GIVEN,
-                seed=model_settings.get('seed', NOT_GIVEN),
-                reasoning_effort=model_settings.get('openai_reasoning_effort', NOT_GIVEN),
-                user=model_settings.get('openai_user', NOT_GIVEN),
-                web_search_options=web_search_options or NOT_GIVEN,
-                service_tier=model_settings.get('openai_service_tier', NOT_GIVEN),
-                prediction=model_settings.get('openai_prediction', NOT_GIVEN),
-                temperature=model_settings.get('temperature', NOT_GIVEN),
-                top_p=model_settings.get('top_p', NOT_GIVEN),
-                presence_penalty=model_settings.get('presence_penalty', NOT_GIVEN),
-                frequency_penalty=model_settings.get('frequency_penalty', NOT_GIVEN),
-                logit_bias=model_settings.get('logit_bias', NOT_GIVEN),
-                logprobs=model_settings.get('openai_logprobs', NOT_GIVEN),
-                top_logprobs=model_settings.get('openai_top_logprobs', NOT_GIVEN),
-                extra_headers=extra_headers,
-                extra_body=model_settings.get('extra_body'),
-            )
-        except APIStatusError as e:
-            if (status_code := e.status_code) >= 400:
-                raise ModelHTTPError(status_code=status_code, model_name=self.model_name, body=e.body) from e
-            raise  # pragma: lax no cover
+        extra_headers = model_settings.get('extra_headers', {})
+        extra_headers.setdefault('User-Agent', get_user_agent())
+
+        return await completions_create(
+            client=self.client,
+            model_name=self._model_name,
+            messages=messages,
+            stream=stream,
+            model_settings=model_settings,
+            model_request_parameters=model_request_parameters,
+            extra_body=cast(dict[str, Any] | None, model_settings.get('extra_body')),
+            parallel_tool_calls=model_settings.get('parallel_tool_calls', NOT_GIVEN),
+            tool_choice=tool_choice or NOT_GIVEN,
+            stop=model_settings.get('stop_sequences', NOT_GIVEN),
+            max_completion_tokens=model_settings.get('max_tokens', NOT_GIVEN),
+            timeout=model_settings.get('timeout', NOT_GIVEN),
+            response_format=response_format or NOT_GIVEN,
+            seed=model_settings.get('seed', NOT_GIVEN),
+            reasoning_effort=model_settings.get('openai_reasoning_effort', NOT_GIVEN),
+            user=model_settings.get('openai_user', NOT_GIVEN),
+            web_search_options=web_search_options or NOT_GIVEN,
+            service_tier=model_settings.get('openai_service_tier', NOT_GIVEN),
+            prediction=model_settings.get('openai_prediction', NOT_GIVEN),
+            temperature=model_settings.get('temperature', NOT_GIVEN),
+            top_p=model_settings.get('top_p', NOT_GIVEN),
+            presence_penalty=model_settings.get('presence_penalty', NOT_GIVEN),
+            frequency_penalty=model_settings.get('frequency_penalty', NOT_GIVEN),
+            logit_bias=model_settings.get('logit_bias', NOT_GIVEN),
+            logprobs=model_settings.get('openai_logprobs', NOT_GIVEN),
+            top_logprobs=model_settings.get('openai_top_logprobs', NOT_GIVEN),
+            extra_headers=extra_headers,
+        )
 
     def _process_response(self, response: chat.ChatCompletion | str) -> ModelResponse:
         """Process a non-streamed response, and prepare a message to return."""
@@ -524,65 +529,68 @@ class OpenAIChatModel(Model):
         except ValidationError as e:
             raise UnexpectedModelBehavior(f'Invalid response from OpenAI chat completions endpoint: {e}') from e
 
+        base_response = process_response(response, self._model_name, handle_reasoning=True)
+
         choice = response.choices[0]
-        items: list[ModelResponsePart] = []
-        # The `reasoning_content` field is only present in DeepSeek models.
-        # https://api-docs.deepseek.com/guides/reasoning_model
+        items = list(base_response.parts)  # Copy base items
+        vendor_details = base_response.provider_details or {}
+
         if reasoning_content := getattr(choice.message, 'reasoning_content', None):
-            items.append(ThinkingPart(id='reasoning_content', content=reasoning_content, provider_name=self.system))
+            items = [ThinkingPart(id='reasoning_content', content=reasoning_content, provider_name=self.system)] + items
 
-        # NOTE: We don't currently handle OpenRouter `reasoning_details`:
-        # - https://openrouter.ai/docs/use-cases/reasoning-tokens#preserving-reasoning-blocks
-        # NOTE: We don't currently handle OpenRouter/gpt-oss `reasoning`:
-        # - https://cookbook.openai.com/articles/gpt-oss/handle-raw-cot#chat-completions-api
-        # - https://openrouter.ai/docs/use-cases/reasoning-tokens#basic-usage-with-reasoning-tokens
-        # If you need this, please file an issue.
-
-        vendor_details: dict[str, Any] = {}
-
-        # Add logprobs to vendor_details if available
         if choice.logprobs is not None and choice.logprobs.content:
-            # Convert logprobs to a serializable format
             vendor_details['logprobs'] = [
                 {
                     'token': lp.token,
                     'bytes': lp.bytes,
                     'logprob': lp.logprob,
                     'top_logprobs': [
-                        {'token': tlp.token, 'bytes': tlp.bytes, 'logprob': tlp.logprob} for tlp in lp.top_logprobs
+                        {'token': tlp.token, 'bytes': tlp.bytes, 'logprob': tlp.logprob}
+                        for tlp in lp.top_logprobs or []
                     ],
                 }
                 for lp in choice.logprobs.content
             ]
 
         if choice.message.content is not None:
-            items.extend(
-                (replace(part, id='content', provider_name=self.system) if isinstance(part, ThinkingPart) else part)
+            split_items = [
+                replace(part, id='content', provider_name=self.system) if isinstance(part, ThinkingPart) else part
                 for part in split_content_into_text_and_thinking(choice.message.content, self.profile.thinking_tags)
-            )
+            ]
+
+            for i, item in enumerate(items):
+                if isinstance(item, TextPart) and item.content == choice.message.content:
+                    items[i : i + 1] = split_items
+                    break
+
+        def _is_function_tool_call(c: Any) -> TypeGuard[ChatCompletionMessageFunctionToolCall]:
+            return isinstance(c, ChatCompletionMessageFunctionToolCall)
+
+        tool_call_items: list[ToolCallPart] = []
         if choice.message.tool_calls is not None:
             for c in choice.message.tool_calls:
-                if isinstance(c, ChatCompletionMessageFunctionToolCall):
+                if _is_function_tool_call(c):
                     part = ToolCallPart(c.function.name, c.function.arguments, tool_call_id=c.id)
+                    part.tool_call_id = _guard_tool_call_id(part)
+                    tool_call_items.append(part)
                 elif isinstance(c, ChatCompletionMessageCustomToolCall):  # pragma: no cover
-                    # NOTE: Custom tool calls are not supported.
-                    # See <https://github.com/pydantic/pydantic-ai/issues/2513> for more details.
                     raise RuntimeError('Custom tool calls are not supported')
                 else:
-                    assert_never(c)
-                part.tool_call_id = _guard_tool_call_id(part)
-                items.append(part)
+                    raise UnexpectedModelBehavior(f'Unexpected tool call type: {type(c).__name__}')
+
+        items.extend(tool_call_items)
 
         raw_finish_reason = choice.finish_reason
-        vendor_details['finish_reason'] = raw_finish_reason
+        if raw_finish_reason:
+            vendor_details['finish_reason'] = raw_finish_reason
         finish_reason = _CHAT_FINISH_REASON_MAP.get(raw_finish_reason)
 
         return ModelResponse(
             parts=items,
-            usage=_map_usage(response),
+            usage=base_response.usage,
             model_name=response.model,
             timestamp=timestamp,
-            provider_details=vendor_details or None,
+            provider_details=vendor_details if vendor_details else None,
             provider_response_id=response.id,
             provider_name=self._provider.name,
             finish_reason=finish_reason,
@@ -592,24 +600,33 @@ class OpenAIChatModel(Model):
         self, response: AsyncStream[ChatCompletionChunk], model_request_parameters: ModelRequestParameters
     ) -> OpenAIStreamedResponse:
         """Process a streamed response, and prepare a streaming response to return."""
-        peekable_response = _utils.PeekableAsyncStream(response)
+        peekable_response = PeekableAsyncStream(response)
         first_chunk = await peekable_response.peek()
         if isinstance(first_chunk, _utils.Unset):
             raise UnexpectedModelBehavior(  # pragma: no cover
                 'Streamed response ended without content or tool calls'
             )
 
-        # When using Azure OpenAI and a content filter is enabled, the first chunk will contain a `''` model name,
-        # so we set it from a later chunk in `OpenAIChatStreamedResponse`.
         model_name = first_chunk.model or self._model_name
+        timestamp = number_to_datetime(first_chunk.created)
+
+        _, _parts_manager, _usage = await process_streamed_response(
+            response,
+            model_request_parameters,
+            model_name,
+            timestamp,
+            handle_reasoning=True,
+        )
 
         return OpenAIStreamedResponse(
             model_request_parameters=model_request_parameters,
             _model_name=model_name,
             _model_profile=self.profile,
             _response=peekable_response,
-            _timestamp=number_to_datetime(first_chunk.created),
+            _timestamp=timestamp,
             _provider_name=self._provider.name,
+            _parts_manager=_parts_manager,
+            _usage=_usage,
         )
 
     def _get_tools(self, model_request_parameters: ModelRequestParameters) -> list[chat.ChatCompletionToolParam]:
@@ -984,7 +1001,7 @@ class OpenAIResponsesModel(Model):
         model_request_parameters: ModelRequestParameters,
     ) -> OpenAIResponsesStreamedResponse:
         """Process a streamed response, and prepare a streaming response to return."""
-        peekable_response = _utils.PeekableAsyncStream(response)
+        peekable_response = PeekableAsyncStream(response)
         first_chunk = await peekable_response.peek()
         if isinstance(first_chunk, _utils.Unset):  # pragma: no cover
             raise UnexpectedModelBehavior('Streamed response ended without content or tool calls')
@@ -1182,6 +1199,17 @@ class OpenAIResponsesModel(Model):
         else:
             return None, messages
 
+    @staticmethod
+    def _has_status_and_optional_outputs(d: dict[str, Any]) -> TypeGuard[dict[str, str | list[Any]]]:
+        return 'status' in d and isinstance(d.get('status'), str) and ('outputs' in d or True)
+
+    @staticmethod
+    def _is_web_search_return_content(
+        d: dict[str, Any],
+    ) -> TypeGuard[dict[str, Literal['in_progress', 'searching', 'completed', 'failed']]]:
+        status = d.get('status')
+        return isinstance(status, str) and status in {'in_progress', 'searching', 'completed', 'failed'}
+
     async def _map_messages(  # noqa: C901
         self, messages: list[ModelMessage], model_settings: OpenAIResponsesModelSettings
     ) -> tuple[str | NotGiven, list[responses.ResponseInputItemParam]]:
@@ -1299,23 +1327,40 @@ class OpenAIResponsesModel(Model):
                                 openai_messages.append(web_search_item)
                     elif isinstance(item, BuiltinToolReturnPart):
                         if item.provider_name == self.system:
-                            if (
-                                item.tool_name == CodeExecutionTool.kind
-                                and code_interpreter_item is not None
-                                and isinstance(item.content, dict)
-                                and (content := cast(dict[str, Any], item.content))  # pyright: ignore[reportUnknownMemberType]
-                                and (status := content.get('status'))
-                            ):
-                                code_interpreter_item['outputs'] = content.get('outputs')
-                                code_interpreter_item['status'] = status
-                            elif (
-                                item.tool_name == WebSearchTool.kind
-                                and web_search_item is not None
-                                and isinstance(item.content, dict)  # pyright: ignore[reportUnknownMemberType]
-                                and (content := cast(dict[str, Any], item.content))  # pyright: ignore[reportUnknownMemberType]
-                                and (status := content.get('status'))
-                            ):  # pragma: no branch
-                                web_search_item['status'] = status
+                            if item.tool_name == CodeExecutionTool.kind and code_interpreter_item is not None:
+                                content = item.content
+                                if isinstance(content, dict):
+                                    content = cast(dict[str, Any], content)
+                                    status_raw = content.get('status')
+                                    if isinstance(status_raw, str) and status_raw in {
+                                        'in_progress',
+                                        'completed',
+                                        'failed',
+                                        'error',
+                                    }:
+                                        if status_raw == 'error':
+                                            code_status: Literal['in_progress', 'completed', 'failed'] = 'failed'
+                                        else:
+                                            code_status: Literal['in_progress', 'completed', 'failed'] = cast(
+                                                Literal['in_progress', 'completed', 'failed'], status_raw
+                                            )
+                                        code_interpreter_item['outputs'] = content.get('outputs')
+                                        code_interpreter_item['status'] = code_status
+                            elif item.tool_name == WebSearchTool.kind and web_search_item is not None:
+                                content = item.content
+                                if isinstance(content, dict):
+                                    content = cast(dict[str, Any], content)
+                                    status_raw = content.get('status')
+                                    if isinstance(status_raw, str) and status_raw in {
+                                        'in_progress',
+                                        'searching',
+                                        'completed',
+                                        'failed',
+                                    }:
+                                        web_status: Literal['in_progress', 'searching', 'completed', 'failed'] = cast(
+                                            Literal['in_progress', 'searching', 'completed', 'failed'], status_raw
+                                        )
+                                        web_search_item['status'] = web_status
                     elif isinstance(item, ThinkingPart):
                         if item.id and send_item_ids:
                             signature: str | None = None
@@ -1443,6 +1488,8 @@ class OpenAIStreamedResponse(StreamedResponse):
     _response: AsyncIterable[ChatCompletionChunk]
     _timestamp: datetime
     _provider_name: str
+    _parts_manager: Any
+    _usage: usage.RequestUsage
 
     async def _get_event_iterator(self) -> AsyncIterator[ModelResponseStreamEvent]:
         async for chunk in self._response:
@@ -1460,7 +1507,7 @@ class OpenAIStreamedResponse(StreamedResponse):
                 continue
 
             # When using Azure OpenAI and an async content filter is enabled, the openai SDK can return None deltas.
-            if choice.delta is None:  # pyright: ignore[reportUnnecessaryComparison]
+            if choice.delta is None:  # type: ignore[reportUnnecessaryComparison]
                 continue
 
             if raw_finish_reason := choice.finish_reason:
