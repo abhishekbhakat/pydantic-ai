@@ -6,6 +6,7 @@ import functools
 import os
 from collections.abc import AsyncIterator
 from importlib.metadata import distributions
+from typing import Any
 
 import pytest
 from inline_snapshot import snapshot
@@ -180,6 +181,17 @@ def test_is_async_callable():
 
     partial_async_callable = functools.partial(AsyncCallable())
     assert is_async_callable(partial_async_callable) is True
+
+    class HiddenCallable:
+        def __call__(self) -> None:  # pragma: no branch
+            return None
+
+        def __getattribute__(self, item: str) -> Any:
+            if item == '__call__':
+                raise AttributeError
+            return super().__getattribute__(item)
+
+    assert is_async_callable(HiddenCallable()) is False
 
 
 def test_merge_json_schema_defs():
